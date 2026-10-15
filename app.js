@@ -2,7 +2,13 @@
   "use strict";
   const API = "https://lavdvbscgvtojenavuec.supabase.co/functions/v1/nft-tips-data";
   const $ = (id) => document.getElementById(id);
-  const mem = {}; const store = { getItem: (k) => mem[k] ?? null, setItem: (k, v) => (mem[k] = v), removeItem: (k) => delete mem[k] };
+  const mem = {}; let ls = null; try { ls = window["local" + "Storage"]; ls.getItem("x"); } catch { ls = null; }
+  const store = {
+    getItem: (k) => mem[k] ?? (ls ? ls.getItem(k) : null),
+    setItem: (k, v, keep) => { mem[k] = v; if (ls && keep) ls.setItem(k, v); },
+    removeItem: (k) => { delete mem[k]; if (ls) ls.removeItem(k); },
+  };
+  let cache = null; // {start,end,rows,last_sync}
   const DEFAULTS = {
     office: "Rosa Hernandez, Rachel McFarland",
     fallback: "Troy McKay",
@@ -165,7 +171,7 @@
   }
 
   /* ---------- Render ---------- */
-  function render(R, lastSync) {
+  function render(R, lastSync, scroll) {
     const el = $("report");
     const kp = (k, v, cls = "") => `<div class="kpi ${cls}"><div class="k">${k}</div><div class="v">${v}</div></div>`;
     const syncTxt = lastSync ? new Date(lastSync).toLocaleString("en-US", { timeZone: "America/Los_Angeles", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) + " PT" : "unknown";
@@ -173,7 +179,7 @@
     const dailyRows = R.daily.map((x) => `<tr><td class="l">${dow(x.d)} ${fmtDate(x.d)}</td><td>${x.count || ""}</td><td>${money(x.dayTips)}</td><td>${money(x.office)}</td>${x.hrs.map((h) => `<td class="${h.hours ? "" : "dim"}">${h.hours ? h.hours.toFixed(2) : "–"}</td><td class="${x.split[h.name] ? "hl" : "dim"}">${x.split[h.name] ? money(x.split[h.name]) : "–"}</td>`).join("")}<td class="${x.fb ? "hl" : "dim"}">${x.fb ? money(x.fb) : "–"}</td><td>${money(x.docks)}</td><td>${money(x.tenth)}</td></tr>`).join("");
     const sum = (f) => R.daily.reduce((s, x) => s + f(x), 0);
     const dailyTotal = `<tr class="total"><td class="l">Total</td><td>${R.rows.length}</td><td>${money(R.total)}</td><td>${money(R.officeTotal)}</td>${R.officeNames.map((n, i) => `<td>${sum((x) => x.hrs[i].hours).toFixed(2)}</td><td>${money(r2(sum((x) => x.split[n])))}</td>`).join("")}<td>${money(r2(sum((x) => x.fb)))}</td><td>${money(r2(sum((x) => x.docks)))}</td><td>${money(r2(sum((x) => x.tenth)))}</td></tr>`;
-    const payRows = R.payout.map((p) => `<tr><td class="l">${esc(p.name)}</td><td class="l muted">${esc(p.parts.join(" + ") || (p.comm ? "commission only" : ""))}</td><td>${money(p.tips)}</td><td>${p.comm ? money(p.comm) : "–"}</td><td>${money(p.total)}</td></tr>`).join("");
+    const payRows = R.payout.map((p) => `<tr><td class="l">${esc(p.name)}</td><td class="l muted">${esc(p.parts.join(" + ") || (p.comm ? "commission only" : ""))}</td><td>${money(p.tips)}</td><td><input class="cin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="$0.00" aria-label="Commission for ${esc(p.name)}" data-name="${esc(p.name)}" value="${p.comm ? p.comm.toFixed(2) : ""}"></td><td>${money(p.total)}</td></tr>`).join("");
     const dockRows = Object.entries(R.dockPeople).sort((a, b) => b[1].amt - a[1].amt).map(([n, v]) => `<tr><td class="l">${esc(n)}</td><td>${v.hours.toFixed(2)}</td><td>${money(r2(v.amt))}</td></tr>`).join("");
     const detail = R.rows.map((r) => `<tr><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(to12(r.time))}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer)}</td><td class="l">${esc(r.product || "")}</td><td>${money(r.tip)}</td></tr>`).join("");
     const notes = R.notes.length ? R.notes.map((n) => `<li>${esc(n)}</li>`).join("") : `<li class="ok">No issues found.</li>`;
@@ -190,9 +196,16 @@
         <p class="foot">Each day's 75% split by that day's hours (roles: ${esc(settings.dockRoles)}). Reference only. Christian's split is final.${R.dockUnassigned ? " Unassigned: " + money(R.dockUnassigned) + "." : ""}</p></div>
       <div class="card pb"><h2>Tip detail from Peek</h2><div class="tablewrap"><table><thead><tr><th>Date</th><th class="l">Time</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Product</th><th>Tip</th></tr></thead><tbody>${detail}<tr class="total"><td class="l" colspan="5">Total</td><td>${money(R.total)}</td></tr></tbody></table></div></div>`;
     el.classList.remove("hidden");
+    el.querySelectorAll(".cin").forEach((i) => i.addEventListener("change", () => {
+      const n = i.dataset.name; let c = settings.comm.find((x) => matches(x.name, n));
+      if (!c) settings.comm.push((c = { name: n, amt: "" }));
+      c.amt = i.value; settings.comm.filter((x) => x !== c && matches(x.name, n)).forEach((x) => (x.amt = ""));
+      $("commRows").innerHTML = ""; settings.comm.forEach(commRow);
+      recompute(false);
+    }));
     $("xl").onclick = () => exportXlsx(R);
     $("pdf").onclick = () => window.print();
-    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (scroll) el.scrollIntoView({ behavior: "smooth", block: "start" });
   }
   function to12(t) { const [h, m] = t.split(":").map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`; }
 
@@ -224,8 +237,7 @@
     $("commRows").innerHTML = ""; settings.comm.forEach(commRow);
     ["office", "fallback", "five", "dockRoles"].forEach((id) => $(id).addEventListener("change", save));
     $("addComm").onclick = () => commRow({ name: "", amt: "" });
-    const [s, e] = halfMonth("prev"); $("start").value = s; $("end").value = e;
-    document.querySelectorAll(".chip").forEach((b) => (b.onclick = () => { const [a, z] = halfMonth(b.dataset.q); $("start").value = a; $("end").value = z; }));
+
   }
   function handleFile(file) {
     if (!file) return;
@@ -235,7 +247,8 @@
         timesheet = readTimesheet(String(fr.result), file.name);
         $("drop").classList.add("loaded");
         $("dropTitle").textContent = file.name;
-        $("dropSub").textContent = `${timesheet.shifts} shifts · ${fmtDate(timesheet.first)} – ${fmtDate(timesheet.last)} · tap to replace`;
+        $("dropSub").textContent = `${timesheet.shifts} shifts · ${fmtDate(timesheet.first)} – ${fmtDate(timesheet.last)} · click to replace`;
+        buildChips();
       } catch (err) { timesheet = null; $("drop").classList.remove("loaded"); $("dropTitle").textContent = "Couldn't read that file"; $("dropSub").textContent = err.message; }
     };
     fr.readAsText(file);
@@ -245,7 +258,7 @@
 
   $("loginForm").addEventListener("submit", async (e) => {
     e.preventDefault(); $("loginErr").classList.add("hidden");
-    store.setItem("nftTipsPw", $("pw").value);
+    store.setItem("nftTipsPw", $("pw").value, $("remember").checked);
     try { await api({ check: true }); $("pw").value = ""; unlocked(); }
     catch (err) { store.removeItem("nftTipsPw"); $("loginErr").textContent = /^Password no longer/.test(err.message) ? "Wrong password." : err.message; $("loginErr").classList.remove("hidden"); }
   });
@@ -256,19 +269,46 @@
   ["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
   drop.addEventListener("drop", (e) => handleFile(e.dataTransfer.files[0]));
 
-  $("run").onclick = async () => {
+  function periodsFor(ts) {
+    // halves of each month touched by the file's payroll period (or its shift dates)
+    let a = ts.first, z = ts.last;
+    const m = String(ts.period || "").match(/(\d{2})\/(\d{2})\/(\d{4})\s*To\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+    if (m) { a = `${m[3]}-${m[1]}-${m[2]}`; z = `${m[6]}-${m[4]}-${m[5]}`; }
+    const out = []; let [y, mo] = a.split("-").map(Number);
+    while (`${y}-${String(mo).padStart(2, "0")}-01` <= z) {
+      const last = new Date(y, mo, 0).getDate(), p = `${y}-${String(mo).padStart(2, "0")}`;
+      [[`${p}-01`, `${p}-15`], [`${p}-16`, `${p}-${last}`]].forEach(([s, e]) => { if (e >= a && s <= z) out.push([s < a ? a : s, e > z ? z : e]); });
+      mo++; if (mo > 12) { mo = 1; y++; }
+    }
+    if (out.length > 1) out.push([a, z, "whole"]);
+    return out;
+  }
+  const label = (s, e) => { const f = (d) => new Date(d + "T12:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }); return `${f(s)} – ${f(e)}`; };
+  function buildChips() {
+    const ps = periodsFor(timesheet), box = $("periodChips"); box.innerHTML = "";
+    ps.forEach(([s, e, w]) => { const b = document.createElement("button"); b.type = "button"; b.className = "chip"; b.textContent = w ? "Whole file (" + label(s, e) + ")" : label(s, e); b.onclick = () => pick(s, e, b); box.appendChild(b); });
+    // default: the most recent half-month
+    const halves = ps.filter((p) => !p[2]); const d = halves[halves.length - 1];
+    pick(d[0], d[1], box.children[halves.length - 1]);
+  }
+  function pick(s, e, btn) {
+    document.querySelectorAll("#periodChips .chip").forEach((c) => c.classList.toggle("on", c === btn));
+    $("start").value = s; $("end").value = e; run();
+  }
+  function recompute(scroll) { if (!cache || !timesheet) return; lastReport = compute(cache.start, cache.end, cache.rows, timesheet); render(lastReport, cache.last_sync, scroll); }
+  $("run").onclick = () => { document.querySelectorAll("#periodChips .chip").forEach((c) => c.classList.remove("on")); run(); };
+  async function run() {
     const start = $("start").value, end = $("end").value;
     if (!start || !end || start > end) return status("Pick a valid start and end date.", true);
     if (!timesheet) return status("Upload the Homebase timesheet CSV first.", true);
-    save(); $("run").disabled = true; status("Pulling tips from Peek…");
+    save(); status("Pulling tips from Peek…");
     try {
       const data = await api({ start, end });
-      lastReport = compute(start, end, data.rows, timesheet);
-      render(lastReport, data.last_sync);
-      status(`Done · ${data.rows.length} tipped bookings.`);
+      cache = { start, end, rows: data.rows, last_sync: data.last_sync };
+      recompute(true);
+      status(`${label(start, end)} · ${data.rows.length} tipped bookings from Peek.`);
     } catch (err) { status(err.message, true); }
-    finally { $("run").disabled = false; }
-  };
+  }
   function status(t, bad) { $("status").textContent = t; $("status").style.color = bad ? "var(--err)" : ""; }
 
   initSettings();

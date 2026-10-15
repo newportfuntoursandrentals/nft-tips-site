@@ -29,6 +29,7 @@
     <form id="loginForm">
       <label for="pw">Password</label>
       <input id="pw" type="password" autocomplete="current-password" required>
+      <label class="check"><input id="remember" type="checkbox" checked> Remember on this device</label>
       <button class="primary" type="submit">Unlock</button>
       <p id="loginErr" class="err hidden" role="alert"></p>
     </form>
@@ -36,42 +37,54 @@
 
   <!-- APP -->
   <section id="app" class="hidden">
-    <div class="card setup">
-      <h1>Build a tips report</h1>
-      <div class="grid3">
-        <div><label for="start">Period start</label><input id="start" type="date"></div>
-        <div><label for="end">Period end</label><input id="end" type="date"></div>
-        <div class="quick"><span class="label">Quick pick</span>
-          <div class="chips"><button type="button" class="chip" data-q="prev">Last half-month</button><button type="button" class="chip" data-q="cur">This half-month</button></div>
-        </div>
+    <div class="intro">
+      <h1>Tips Report</h1>
+      <p class="muted">Upload the Homebase timesheet export and get the tip split. Tips come from Peek automatically.</p>
+    </div>
+
+    <div class="card step">
+      <div class="stepnum">1</div>
+      <div class="stepbody">
+        <h2>Upload the Homebase CSV</h2>
+        <label class="drop" id="drop" for="csv">
+          <input id="csv" type="file" accept=".csv,text/csv">
+          <span class="drop-title" id="dropTitle">Drop the CSV here, or click to choose</span>
+          <span class="muted" id="dropSub">Homebase → Timesheets → Export (ends in .csv). The file stays on this device.</span>
+        </label>
       </div>
+    </div>
 
-      <label class="drop" id="drop" for="csv">
-        <input id="csv" type="file" accept=".csv,text/csv">
-        <span class="drop-title" id="dropTitle">Upload the Homebase timesheet CSV</span>
-        <span class="muted" id="dropSub">Drag it here or tap to choose. The file stays on this device.</span>
-      </label>
-
-      <details class="settings">
-        <summary>Settings and commissions</summary>
-        <div class="grid2">
-          <div><label for="office">Office staff split by hours (Homebase names, comma separated)</label><input id="office" type="text"></div>
-          <div><label for="fallback">Gets office share when no office staff clocked in</label><input id="fallback" type="text"></div>
-          <div><label for="five">5% each (comma separated)</label><input id="five" type="text"></div>
-          <div><label for="dockRoles">Dock roles for the dock estimate (comma separated)</label><input id="dockRoles" type="text"></div>
-        </div>
-        <h3>Commissions (entered by hand)</h3>
-        <div id="commRows"></div>
-        <button type="button" class="ghost small" id="addComm">Add person</button>
-      </details>
-
-      <div class="actions">
-        <button class="primary" id="run" type="button">Run report</button>
-        <span id="status" class="muted" aria-live="polite"></span>
+    <div class="card step" id="step2">
+      <div class="stepnum">2</div>
+      <div class="stepbody">
+        <h2>Pick the pay period</h2>
+        <div class="chips" id="periodChips"><span class="muted">Upload the CSV first.</span></div>
+        <details class="custom"><summary>Custom dates</summary>
+          <div class="grid2">
+            <div><label for="start">Start</label><input id="start" type="date"></div>
+            <div><label for="end">End</label><input id="end" type="date"></div>
+          </div>
+          <button class="ghost small" id="run" type="button">Use these dates</button>
+        </details>
+        <p id="status" class="muted" aria-live="polite"></p>
       </div>
     </div>
 
     <div id="report" class="hidden"></div>
+
+    <details class="card settings">
+      <summary>Advanced settings</summary>
+      <div class="grid2">
+        <div><label for="office">Office staff split by hours (Homebase names, comma separated)</label><input id="office" type="text"></div>
+        <div><label for="fallback">Gets office share when no office staff clocked in</label><input id="fallback" type="text"></div>
+        <div><label for="five">5% each (comma separated)</label><input id="five" type="text"></div>
+        <div><label for="dockRoles">Dock roles for the dock estimate (comma separated)</label><input id="dockRoles" type="text"></div>
+      </div>
+      <h3>People with commissions</h3>
+      <div id="commRows"></div>
+      <button type="button" class="ghost small" id="addComm">Add person</button>
+      <p class="foot">Commission amounts are typed in the Payout table each period.</p>
+    </details>
   </section>
 </main>
 <script src="xlsx.full.min.js"></script>
