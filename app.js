@@ -198,11 +198,7 @@
     officeNames.forEach((n) => add(n, r2(officePay[n]), "office by hours"));
     if (fallback) add(fallback, r2(fallbackOffice), "office days with no office staff");
     five.forEach((n) => add(n, fivePct, "5%"));
-    capRows.filter((r) => r.isCap && r.toCap > 0).forEach((r) => {
-      const names = r.captains.length ? r.captains : ["Captain (name not in Peek notes)"];
-      const amts = splitByHours(r.toCap, names.map((n) => ({ name: n, hours: 1 })));
-      names.forEach((n, i) => add(r.captains.length ? "Captain " + n : n, amts[i], "captain tips"));
-    });
+    if (captainTotal > 0) add("Captains (total)", captainTotal, "paid on the spot");
     payout.forEach((p) => { if (p.parts.length > 1) p.parts = [...new Set(p.parts)]; });
     settings.comm.forEach((c) => { const a = parseFloat(c.amt); if (c.name.trim()) { add(c.name.trim(), 0); const p = payout.find((x) => matches(x.name, c.name.trim())); p.comm = r2(p.comm + (isNaN(a) ? 0 : a)); } });
     payout.forEach((p) => (p.total = r2(p.tips + p.comm)));
@@ -216,8 +212,6 @@
     if (Math.abs(diff) > 0.05) notes.push(`Check: office + docks + 5% shares differ from total tips by ${money(diff)}.`);
     const anomalies = daily.reduce((s, x) => s + (x.win?.anomalies?.length || 0), 0);
     if (anomalies) notes.push(`${anomalies} vQuip check-out/in time${anomalies > 1 ? "s" : ""} looked wrong (test scans or scans on another day). Those bookings use their scheduled Peek time instead. Details are in the Dock window table.`);
-    const noName = capRows.filter((r) => r.isCap && !r.captains.length);
-    if (noName.length) notes.push(`${noName.map((r) => r.id).join(", ")}: captained tour but no captain name in the Peek notes. Add "Captain <name>" to the booking notes in Peek, then run the report again.`);
     const nCap = capRows.filter((r) => r.isCap).length;
     if (capRows.length) notes.push(`${nCap} captained booking${nCap === 1 ? "" : "s"} with tips found from Peek notes. Check the Captain tips table and untick any that weren't captained.`);
     return { start, end, rows, daily, total, gross, captainTotal, capRows, officeTotal, docksTotal, fivePct, payout, officeNames, fallback, five, dockPeople, dockUnassigned: r2(dockUnassigned), notes };
