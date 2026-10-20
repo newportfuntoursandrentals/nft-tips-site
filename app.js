@@ -81,6 +81,23 @@
     m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); if (m) return `${m[1]}-${m[2]}-${m[3]}`;
     return null;
   }
+  // "2:25pm" -> minutes after midnight
+  function clock(s) {
+    const m = String(s || "").trim().toLowerCase().match(/^(\d{1,2}):(\d{2})\s*(am|pm)?$/);
+    if (!m) return null; let h = Number(m[1]) % 12; if (m[3] === "pm") h += 12; if (!m[3]) h = Number(m[1]);
+    return h * 60 + Number(m[2]);
+  }
+  const hm = (m) => `${((Math.floor(m / 60) + 11) % 12) + 1}:${String(m % 60).padStart(2, "0")} ${Math.floor(m / 60) % 24 < 12 ? "AM" : "PM"}`;
+  const toMin = (t) => (t ? Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5)) : null);
+  const ov = (a1, a2, b1, b2) => Math.max(0, Math.min(a2, b2) - Math.max(a1, b1));
+  // Hours a dock shift counts toward tips: only the part between first boat out and last boat back.
+  function dockCounted(s, w) {
+    if (!w || w.out === null || w.back === null || s.inM === null || s.outM === null) return { h: s.hours, how: "paid hours (no clock or rental times)" };
+    let mins = ov(s.inM, s.outM, w.out, w.back);
+    if (s.bs !== null && s.be !== null && s.be > s.bs) mins -= ov(s.bs, s.be, w.out, w.back);
+    else if (s.unpaid > 0 && s.outM > s.inM) mins -= Math.round(s.unpaid * 60 * (mins / (s.outM - s.inM)));
+    return { h: r2(Math.max(0, mins) / 60), how: "rental window" };
+  }
   function readTimesheet(text, fileName) {
     const rows = parseCSV(text);
     let hi = -1, cols = {};
@@ -100,7 +117,13 @@
       if (!d) continue;
       const hrsCol = cols["total paid hours"] ?? cols["actual hours"];
       const hours = parseFloat(r[hrsCol]) || 0;
-      (byDate[d] ||= []).push({ name, role: (r[cols["role"]] || "").trim(), hours });
+      const inM = clock(r[cols["clock in time"]]);
+      let outM = clock(r[cols["clock out time"]]);
+      const od = parseDate(r[cols["clock out date"]]);
+      if (outM !== null && od && od > d) outM += 1440;
+      const bs = clock(r[cols["break start"]]), be = clock(r[cols["break end"]]);
+      const unpaid = parseFloat(r[cols["unpaid breaks"]]) || 0;
+      (byDate[d] ||= []).push({ name, role: (r[cols["role"]] || "").trim(), hours, inM, outM, bs, be, unpaid });
       shifts++;
     }
     if (!shifts) throw new Error("This doesn't look like a Homebase timesheet export (no Name / Clock in date rows found).");
@@ -118,7 +141,8 @@
   }
 
   /* ---------- Calculation ---------- */
-  function compute(start, end, rows, ts) {
+  function compute(start, end, rows, ts, windows) {
+    windows = windows || {};
     const officeNames = list(settings.office), fallback = settings.fallback.trim(), five = list(settings.five);
     const dockRoles = list(settings.dockRoles).map(norm);
     const isOffice = (n) => officeNames.some((o) => matches(o, n));
@@ -139,14 +163,16 @@
       if (working.length) { const amts = splitByHours(office, working); working.forEach((w, i) => { split[w.name] = amts[i]; officePay[w.name] += amts[i]; }); }
       else { fb = office; fallbackOffice += office; }
       // dock estimate (reference only)
-      const dockShifts = {};
-      shifts.forEach((s) => { if (!isOffice(s.name) && !(fallback && matches(fallback, s.name)) && dockRoles.includes(norm(s.role)) && s.hours > 0) dockShifts[s.name] = (dockShifts[s.name] || 0) + s.hours; });
-      const dp = Object.entries(dockShifts).map(([name, hours]) => ({ name, hours }));
+      const dockShifts = {}, dockPaid = {};
+      const wd = windows[d]; const w = wd ? { out: toMin(wd.first_out), back: toMin(wd.last_back) } : null;
+      shifts.forEach((s) => { if (!isOffice(s.name) && !(fallback && matches(fallback, s.name)) && dockRoles.includes(norm(s.role)) && s.hours > 0) { const c = dockCounted(s, w); dockShifts[s.name] = (dockShifts[s.name] || 0) + c.h; dockPaid[s.name] = (dockPaid[s.name] || 0) + s.hours; } });
+      const dp = Object.entries(dockShifts).filter(([, hours]) => hours > 0).map(([name, hours]) => ({ name, hours }));
+      Object.keys(dockPaid).forEach((n) => { (dockPeople[n] ||= { hours: 0, amt: 0, paid: 0 }); dockPeople[n].paid = (dockPeople[n].paid || 0) + dockPaid[n]; });
       const dockSplit = {};
-      if (dp.length && docks > 0) { const a = splitByHours(docks, dp); dp.forEach((p, i) => { dockSplit[p.name] = a[i]; (dockPeople[p.name] ||= { hours: 0, amt: 0 }); dockPeople[p.name].hours += p.hours; dockPeople[p.name].amt += a[i]; }); }
+      if (dp.length && docks > 0) { const a = splitByHours(docks, dp); dp.forEach((p, i) => { dockSplit[p.name] = a[i]; (dockPeople[p.name] ||= { hours: 0, amt: 0, paid: 0 }); dockPeople[p.name].hours += p.hours; dockPeople[p.name].amt += a[i]; }); }
       else if (docks > 0) dockUnassigned += docks;
-      dp.forEach((p) => { if (!(p.name in dockSplit)) { (dockPeople[p.name] ||= { hours: 0, amt: 0 }); dockPeople[p.name].hours += p.hours; } });
-      return { d, count: (tipsByDay[d] || []).length, dayTips, office, docks, tenth, hrs, split, fb, dockSplit, dockHours: dp.reduce((a, p) => a + p.hours, 0) };
+      dp.forEach((p) => { if (!(p.name in dockSplit)) { (dockPeople[p.name] ||= { hours: 0, amt: 0, paid: 0 }); dockPeople[p.name].hours += p.hours; } });
+      return { d, count: (tipsByDay[d] || []).length, dayTips, office, docks, tenth, hrs, split, fb, dockSplit, dockHours: dp.reduce((a, p) => a + p.hours, 0), win: wd || null, dockDetail: dp.map((p) => `${p.name.split(" ")[0]} ${p.hours.toFixed(2)}`).join(", ") };
     });
     const officeTotal = r2(daily.reduce((s, x) => s + x.office, 0));
     const docksTotal = r2(total * 0.75), fivePct = r2(total * 0.05);
@@ -167,6 +193,8 @@
     daily.forEach((x) => { if (x.docks > 0 && !x.dockHours) notes.push(`${dow(x.d)} ${fmtDate(x.d)}: no dock hours found, so ${money(x.docks)} of the dock estimate is unassigned.`); });
     const diff = r2(total - officeTotal - docksTotal - fivePct * 2);
     if (Math.abs(diff) > 0.05) notes.push(`Check: office + docks + 5% shares differ from total tips by ${money(diff)}.`);
+    const anomalies = daily.reduce((s, x) => s + (x.win?.anomalies?.length || 0), 0);
+    if (anomalies) notes.push(`${anomalies} vQuip check-out/in time${anomalies > 1 ? "s" : ""} looked wrong (test scans, very late or very early). Those bookings use their scheduled Peek time instead. Details are in the Dock window table.`);
     return { start, end, rows, daily, total, officeTotal, docksTotal, fivePct, payout, officeNames, fallback, five, dockPeople, dockUnassigned: r2(dockUnassigned), notes };
   }
 
@@ -180,7 +208,10 @@
     const sum = (f) => R.daily.reduce((s, x) => s + f(x), 0);
     const dailyTotal = `<tr class="total"><td class="l">Total</td><td>${R.rows.length}</td><td>${money(R.total)}</td><td>${money(R.officeTotal)}</td>${R.officeNames.map((n, i) => `<td>${sum((x) => x.hrs[i].hours).toFixed(2)}</td><td>${money(r2(sum((x) => x.split[n])))}</td>`).join("")}<td>${money(r2(sum((x) => x.fb)))}</td><td>${money(r2(sum((x) => x.docks)))}</td><td>${money(r2(sum((x) => x.tenth)))}</td></tr>`;
     const payRows = R.payout.map((p) => `<tr><td class="l">${esc(p.name)}</td><td class="l muted">${esc(p.parts.join(" + ") || (p.comm ? "commission only" : ""))}</td><td>${money(p.tips)}</td><td><input class="cin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="$0.00" aria-label="Commission for ${esc(p.name)}" data-name="${esc(p.name)}" value="${p.comm ? p.comm.toFixed(2) : ""}"></td><td>${money(p.total)}</td></tr>`).join("");
-    const dockRows = Object.entries(R.dockPeople).sort((a, b) => b[1].amt - a[1].amt).map(([n, v]) => `<tr><td class="l">${esc(n)}</td><td>${v.hours.toFixed(2)}</td><td>${money(r2(v.amt))}</td></tr>`).join("");
+    const dockRows = Object.entries(R.dockPeople).sort((a, b) => b[1].amt - a[1].amt).map(([n, v]) => `<tr><td class="l">${esc(n)}</td><td>${(v.paid || 0).toFixed(2)}</td><td>${v.hours.toFixed(2)}</td><td>${money(r2(v.amt))}</td></tr>`).join("");
+    const t12 = (t) => (t ? hm(toMin(t)) : "–");
+    const winRows = R.daily.filter((x) => x.win).map((x) => { const w = x.win; const an = (w.anomalies || []).map((a) => `${a.id}: ${a.why}`).join("; ");
+      return `<tr><td class="l">${dow(x.d)} ${fmtDate(x.d)}</td><td>${t12(w.first_out)}</td><td class="l muted">${esc(w.out_source || "")}</td><td>${t12(w.last_back)}</td><td class="l muted">${esc(w.back_source || "")}</td><td>${money(x.docks)}</td><td class="l">${esc(x.dockDetail || "–")}</td><td class="l muted">${esc(an || "")}</td></tr>`; }).join("");
     const detail = R.rows.map((r) => `<tr><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(to12(r.time))}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer)}</td><td class="l">${esc(r.product || "")}</td><td>${money(r.tip)}</td></tr>`).join("");
     const notes = R.notes.length ? R.notes.map((n) => `<li>${esc(n)}</li>`).join("") : `<li class="ok">No issues found.</li>`;
     el.innerHTML = `
@@ -192,8 +223,10 @@
         <p class="foot">Docks 75% (${money(R.docksTotal)}) goes to Christian for the dock split. Office is rounded per day and the 5% shares per period, so totals can differ by a few cents.</p></div>
       <div class="card"><h2>Daily office split</h2><div class="tablewrap"><table><thead><tr><th>Day</th><th># tips</th><th>Tips</th><th>Office 15%</th>${officeHdr}<th>${esc((R.fallback || "Fallback").split(" ")[0])} office $</th><th>Docks 75%</th><th>10% (5%+5%)</th></tr></thead><tbody>${dailyRows}${dailyTotal}</tbody></table></div>
         <p class="foot">Office 15% each day is split by Homebase paid hours. If nobody listed as office staff clocked in, it goes to ${esc(R.fallback || "the fallback person")}.</p></div>
-      <div class="card pb"><h2>Dock pool by hours <span class="badge">Estimate for Christian</span></h2><div class="tablewrap"><table><thead><tr><th>Dock staff</th><th>Hours</th><th>Estimated share</th></tr></thead><tbody>${dockRows || `<tr><td class="l" colspan="3">No dock hours in this timesheet.</td></tr>`}</tbody></table></div>
-        <p class="foot">Each day's 75% split by that day's hours (roles: ${esc(settings.dockRoles)}). Reference only. Christian's split is final.${R.dockUnassigned ? " Unassigned: " + money(R.dockUnassigned) + "." : ""}</p></div>
+      <div class="card pb"><h2>Dock pool by hours <span class="badge">Estimate for Christian</span></h2><div class="tablewrap"><table><thead><tr><th>Dock staff</th><th>Paid hrs</th><th>Tip hrs</th><th>Estimated share</th></tr></thead><tbody>${dockRows || `<tr><td class="l" colspan="4">No dock hours in this timesheet.</td></tr>`}</tbody></table></div>
+        <p class="foot">Tip hrs count only the time between the first boat out and the last boat back that day (from vQuip; Peek schedule when vQuip is missing or looks wrong).</p>
+        <h3>Dock window by day</h3><div class="tablewrap"><table><thead><tr><th>Day</th><th>First out</th><th class="l">Source</th><th>Last back</th><th class="l">Source</th><th>Docks 75%</th><th class="l">Tip hrs</th><th class="l">Fixed vQuip times</th></tr></thead><tbody>${winRows}</tbody></table></div>
+        <p class="foot">Each day's 75% split by that day's tip hours (roles: ${esc(settings.dockRoles)}). Reference only. Christian's split is final.${R.dockUnassigned ? " Unassigned: " + money(R.dockUnassigned) + "." : ""}</p></div>
       <div class="card pb"><h2>Tip detail from Peek</h2><div class="tablewrap"><table><thead><tr><th>Date</th><th class="l">Time</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Product</th><th>Tip</th></tr></thead><tbody>${detail}<tr class="total"><td class="l" colspan="5">Total</td><td>${money(R.total)}</td></tr></tbody></table></div></div>`;
     el.classList.remove("hidden");
     el.querySelectorAll(".cin").forEach((i) => i.addEventListener("change", () => {
@@ -216,7 +249,9 @@
     const hdr = ["Day", "Date", "# Tips", "Tips", "Office 15%", ...R.officeNames.flatMap((n) => [n + " hrs", n + " $"]), (R.fallback || "Fallback") + " office $", "Docks 75%", "10% (5%+5%)"];
     const dl = R.daily.map((x) => [dow(x.d), fmtDate(x.d), x.count, x.dayTips, x.office, ...x.hrs.flatMap((h) => [h.hours, x.split[h.name]]), x.fb, x.docks, x.tenth]);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([hdr, ...dl]), "Daily Office Split");
-    const dk = [["Dock staff", "Hours", "Estimated share (reference)"], ...Object.entries(R.dockPeople).map(([n, v]) => [n, r2(v.hours), r2(v.amt)])];
+    const dk = [["Dock staff", "Paid hours", "Tip hours (rental window)", "Estimated share (reference)"], ...Object.entries(R.dockPeople).map(([n, v]) => [n, r2(v.paid || 0), r2(v.hours), r2(v.amt)])];
+    dk.push([], ["Day", "First out", "Source", "Last back", "Source", "Docks 75%", "Tip hours", "Fixed vQuip times"]);
+    R.daily.filter((x) => x.win).forEach((x) => dk.push([fmtDate(x.d), x.win.first_out, x.win.out_source, x.win.last_back, x.win.back_source, x.docks, x.dockDetail, (x.win.anomalies || []).map((a) => a.id + ": " + a.why).join("; ")]));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dk), "Dock Estimate");
     const tips = [["Date", "Time", "Booking", "Customer", "Product", "Tip"], ...R.rows.map((r) => [fmtDate(r.date), to12(r.time), r.id, r.customer, r.product, r.tip])];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(tips), "Peek Tips");
@@ -295,7 +330,7 @@
     document.querySelectorAll("#periodChips .chip").forEach((c) => c.classList.toggle("on", c === btn));
     $("start").value = s; $("end").value = e; run();
   }
-  function recompute(scroll) { if (!cache || !timesheet) return; lastReport = compute(cache.start, cache.end, cache.rows, timesheet); render(lastReport, cache.last_sync, scroll); }
+  function recompute(scroll) { if (!cache || !timesheet) return; lastReport = compute(cache.start, cache.end, cache.rows, timesheet, cache.windows); render(lastReport, cache.last_sync, scroll); }
   $("run").onclick = () => { document.querySelectorAll("#periodChips .chip").forEach((c) => c.classList.remove("on")); run(); };
   async function run() {
     const start = $("start").value, end = $("end").value;
@@ -304,7 +339,7 @@
     save(); status("Pulling tips from Peek…");
     try {
       const data = await api({ start, end });
-      cache = { start, end, rows: data.rows, last_sync: data.last_sync };
+      cache = { start, end, rows: data.rows, windows: data.windows || {}, last_sync: data.last_sync };
       recompute(true);
       status(`${label(start, end)} · ${data.rows.length} tipped bookings from Peek.`);
     } catch (err) { status(err.message, true); }
