@@ -209,7 +209,7 @@
     if (fbDays.length && fallback) notes.push(`No office staff clocked in on ${fbDays.map((x) => fmtDate(x.d)).join(", ")}, so those office shares (${money(r2(fbDays.reduce((s, x) => s + x.fb, 0)))}) go to ${fallback}.`);
     daily.forEach((x) => { if (x.docks > 0 && !x.dockHours) notes.push(`${dow(x.d)} ${fmtDate(x.d)}: no dock hours found, so ${money(x.docks)} of the dock estimate is unassigned.`); });
     const diff = r2(total - officeTotal - docksTotal - fivePct * 2);
-    if (Math.abs(diff) > 0.05) notes.push(`Check: office + docks + 5% shares differ from total tips by ${money(diff)}.`);
+    if (Math.abs(diff) > Math.max(0.05, 0.01 * dayList.length)) notes.push(`Check: office + docks + 5% shares differ from total tips by ${money(diff)}.`);
     const anomalies = daily.reduce((s, x) => s + (x.win?.anomalies?.length || 0), 0);
     if (anomalies) notes.push(`${anomalies} vQuip check-out/in time${anomalies > 1 ? "s" : ""} looked wrong (test scans or scans on another day). Those bookings use their scheduled Peek time instead. Details are in the Dock window table.`);
     const nCap = capRows.filter((r) => r.isCap).length;
@@ -365,10 +365,13 @@
   const label = (s, e) => { const f = (d) => new Date(d + "T12:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }); return `${f(s)} – ${f(e)}`; };
   function buildChips() {
     const ps = periodsFor(timesheet), box = $("periodChips"); box.innerHTML = "";
-    ps.forEach(([s, e, w]) => { const b = document.createElement("button"); b.type = "button"; b.className = "chip"; b.textContent = w ? "Whole file (" + label(s, e) + ")" : label(s, e); b.onclick = () => pick(s, e, b); box.appendChild(b); });
-    // default: the most recent half-month
-    const halves = ps.filter((p) => !p[2]); const d = halves[halves.length - 1];
-    pick(d[0], d[1], box.children[halves.length - 1]);
+    // Whole pay period first, then the half-months inside it.
+    const whole = ps.find((p) => p[2]); const ordered = whole ? [whole, ...ps.filter((p) => !p[2])] : ps;
+    ordered.forEach(([s, e, w]) => { const b = document.createElement("button"); b.type = "button"; b.className = "chip"; b.textContent = w ? "Whole pay period (" + label(s, e) + ")" : label(s, e); b.onclick = () => pick(s, e, b); box.appendChild(b); });
+    // default: the whole pay period in the file (max 62 days), otherwise the latest half-month
+    const days = (p) => (new Date(p[1]) - new Date(p[0])) / 864e5 + 1;
+    if (whole && days(whole) <= 62) pick(whole[0], whole[1], box.children[0]);
+    else { const i = ordered.length - 1; pick(ordered[i][0], ordered[i][1], box.children[i]); }
   }
   function pick(s, e, btn) {
     document.querySelectorAll("#periodChips .chip").forEach((c) => c.classList.toggle("on", c === btn));
