@@ -368,10 +368,9 @@
     // Whole pay period first, then the half-months inside it.
     const whole = ps.find((p) => p[2]); const ordered = whole ? [whole, ...ps.filter((p) => !p[2])] : ps;
     ordered.forEach(([s, e, w]) => { const b = document.createElement("button"); b.type = "button"; b.className = "chip"; b.textContent = w ? "Whole pay period (" + label(s, e) + ")" : label(s, e); b.onclick = () => pick(s, e, b); box.appendChild(b); });
-    // default: the whole pay period in the file (max 62 days), otherwise the latest half-month
-    const days = (p) => (new Date(p[1]) - new Date(p[0])) / 864e5 + 1;
-    if (whole && days(whole) <= 62) pick(whole[0], whole[1], box.children[0]);
-    else { const i = ordered.length - 1; pick(ordered[i][0], ordered[i][1], box.children[i]); }
+    // whole pay period first
+    // default: always the full period the CSV covers
+    pick(ordered[0][0], ordered[0][1], box.children[0]);
   }
   function pick(s, e, btn) {
     document.querySelectorAll("#periodChips .chip").forEach((c) => c.classList.toggle("on", c === btn));
@@ -379,6 +378,18 @@
   }
   function recompute(scroll) { if (!cache || !timesheet) return; lastReport = compute(cache.start, cache.end, cache.rows, timesheet, cache.windows); render(lastReport, cache.last_sync, scroll); }
   $("run").onclick = () => { document.querySelectorAll("#periodChips .chip").forEach((c) => c.classList.remove("on")); run(); };
+  // Peek data is pulled in pieces of up to 31 days, so any period length works.
+  async function fetchRange(start, end) {
+    const add = (d, n) => { const x = new Date(d + "T12:00:00Z"); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+    const out = { rows: [], windows: {}, last_sync: null };
+    for (let s = start; s <= end; s = add(s, 31)) {
+      const e = add(s, 30) < end ? add(s, 30) : end;
+      const part = await api({ start: s, end: e });
+      out.rows.push(...(part.rows || [])); Object.assign(out.windows, part.windows || {});
+      if (part.last_sync && (!out.last_sync || part.last_sync > out.last_sync)) out.last_sync = part.last_sync;
+    }
+    return out;
+  }
   async function run() {
     const start = $("start").value, end = $("end").value;
     if (!start || !end || start > end) return status("Pick a valid start and end date.", true);
@@ -386,7 +397,7 @@
     save(); clearReport(); const my = reqId;
     status(`Pulling tips from Peek for ${label(start, end)}…`);
     try {
-      const data = await api({ start, end });
+      const data = await fetchRange(start, end);
       if (my !== reqId) return; // a newer request replaced this one
       cache = { start, end, rows: data.rows, windows: data.windows || {}, last_sync: data.last_sync };
       recompute(true);
