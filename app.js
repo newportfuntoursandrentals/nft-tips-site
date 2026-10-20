@@ -98,6 +98,9 @@
     else if (s.unpaid > 0 && s.outM > s.inM) mins -= Math.round(s.unpaid * 60 * (mins / (s.outM - s.inM)));
     return { h: r2(Math.max(0, mins) / 60), how: "rental window" };
   }
+  const CAPTAIN_WEEKDAY = 20;
+  const capOff = new Set(); // booking ids unticked as "not captained"
+  const isWeekend = (d) => { const g = new Date(d + "T12:00:00Z").getUTCDay(); return g === 0 || g === 6; };
   function readTimesheet(text, fileName) {
     const rows = parseCSV(text);
     let hi = -1, cols = {};
@@ -147,14 +150,26 @@
     const dockRoles = list(settings.dockRoles).map(norm);
     const isOffice = (n) => officeNames.some((o) => matches(o, n));
     const dayList = days(start, end);
+    // Captain rule: Mon–Fri the captain gets the first $20 of the tip, the rest goes to the pool; Sat/Sun the captain gets it all.
+    const capRows = [];
+    rows = rows.map((r) => {
+      const isCap = Array.isArray(r.captains) && !capOff.has(r.id);
+      const wk = isWeekend(r.date);
+      const toCap = isCap ? (wk ? r.tip : Math.min(CAPTAIN_WEEKDAY, r.tip)) : 0;
+      const x = { ...r, isCap, toCap: r2(toCap), pool: r2(r.tip - toCap) };
+      if (Array.isArray(r.captains)) capRows.push(x);
+      return x;
+    });
+    const gross = r2(rows.reduce((s, r) => s + r.tip, 0));
+    const captainTotal = r2(rows.reduce((s, r) => s + r.toCap, 0));
     const tipsByDay = {}; rows.forEach((r) => { (tipsByDay[r.date] ||= []).push(r); });
-    const total = r2(rows.reduce((s, r) => s + r.tip, 0));
+    const total = r2(rows.reduce((s, r) => s + r.pool, 0));
     const notes = [];
     const officePay = Object.fromEntries(officeNames.map((n) => [n, 0]));
     let fallbackOffice = 0;
     const dockPeople = {}; let dockUnassigned = 0;
     const daily = dayList.map((d) => {
-      const dayTips = r2((tipsByDay[d] || []).reduce((s, r) => s + r.tip, 0));
+      const dayTips = r2((tipsByDay[d] || []).reduce((s, r) => s + r.pool, 0));
       const office = r2(dayTips * 0.15), docks = r2(dayTips * 0.75), tenth = r2(dayTips * 0.10);
       const shifts = ts.byDate[d] || [];
       const hrs = officeNames.map((n) => ({ name: n, hours: r2(shifts.filter((s) => matches(n, s.name)).reduce((a, s) => a + s.hours, 0)) }));
@@ -183,6 +198,12 @@
     officeNames.forEach((n) => add(n, r2(officePay[n]), "office by hours"));
     if (fallback) add(fallback, r2(fallbackOffice), "office days with no office staff");
     five.forEach((n) => add(n, fivePct, "5%"));
+    capRows.filter((r) => r.isCap && r.toCap > 0).forEach((r) => {
+      const names = r.captains.length ? r.captains : ["Captain (name not in Peek notes)"];
+      const amts = splitByHours(r.toCap, names.map((n) => ({ name: n, hours: 1 })));
+      names.forEach((n, i) => add(r.captains.length ? "Captain " + n : n, amts[i], "captain tips"));
+    });
+    payout.forEach((p) => { if (p.parts.length > 1) p.parts = [...new Set(p.parts)]; });
     settings.comm.forEach((c) => { const a = parseFloat(c.amt); if (c.name.trim()) { add(c.name.trim(), 0); const p = payout.find((x) => matches(x.name, c.name.trim())); p.comm = r2(p.comm + (isNaN(a) ? 0 : a)); } });
     payout.forEach((p) => (p.total = r2(p.tips + p.comm)));
 
@@ -194,8 +215,12 @@
     const diff = r2(total - officeTotal - docksTotal - fivePct * 2);
     if (Math.abs(diff) > 0.05) notes.push(`Check: office + docks + 5% shares differ from total tips by ${money(diff)}.`);
     const anomalies = daily.reduce((s, x) => s + (x.win?.anomalies?.length || 0), 0);
-    if (anomalies) notes.push(`${anomalies} vQuip check-out/in time${anomalies > 1 ? "s" : ""} looked wrong (test scans, very late or very early). Those bookings use their scheduled Peek time instead. Details are in the Dock window table.`);
-    return { start, end, rows, daily, total, officeTotal, docksTotal, fivePct, payout, officeNames, fallback, five, dockPeople, dockUnassigned: r2(dockUnassigned), notes };
+    if (anomalies) notes.push(`${anomalies} vQuip check-out/in time${anomalies > 1 ? "s" : ""} looked wrong (test scans or scans on another day). Those bookings use their scheduled Peek time instead. Details are in the Dock window table.`);
+    const noName = capRows.filter((r) => r.isCap && !r.captains.length);
+    if (noName.length) notes.push(`${noName.map((r) => r.id).join(", ")}: captained tour but no captain name in the Peek notes. Add "Captain <name>" to the booking notes in Peek, then run the report again.`);
+    const nCap = capRows.filter((r) => r.isCap).length;
+    if (capRows.length) notes.push(`${nCap} captained booking${nCap === 1 ? "" : "s"} with tips found from Peek notes. Check the Captain tips table and untick any that weren't captained.`);
+    return { start, end, rows, daily, total, gross, captainTotal, capRows, officeTotal, docksTotal, fivePct, payout, officeNames, fallback, five, dockPeople, dockUnassigned: r2(dockUnassigned), notes };
   }
 
   /* ---------- Render ---------- */
@@ -212,22 +237,25 @@
     const t12 = (t) => (t ? hm(toMin(t)) : "–");
     const winRows = R.daily.filter((x) => x.win).map((x) => { const w = x.win; const an = (w.anomalies || []).map((a) => `${a.id}: ${a.why}`).join("; ");
       return `<tr><td class="l">${dow(x.d)} ${fmtDate(x.d)}</td><td>${t12(w.first_out)}</td><td class="l muted">${esc(w.out_source || "")}</td><td>${t12(w.last_back)}</td><td class="l muted">${esc(w.back_source || "")}</td><td>${money(x.docks)}</td><td class="l">${esc(x.dockDetail || "–")}</td><td class="l muted">${esc(an || "")}</td></tr>`; }).join("");
-    const detail = R.rows.map((r) => `<tr><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(to12(r.time))}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer)}</td><td class="l">${esc(r.product || "")}</td><td>${money(r.tip)}</td></tr>`).join("");
+    const detail = R.rows.map((r) => `<tr><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(to12(r.time))}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer)}</td><td class="l">${esc(r.product || "")}</td><td>${money(r.tip)}</td><td class="${r.toCap ? "hl" : "dim"}">${r.toCap ? money(r.toCap) : "–"}</td><td>${money(r.pool)}</td></tr>`).join("");
+    const capTable = R.capRows.length ? `<div class="card"><h2>Captain tips</h2><div class="tablewrap"><table><thead><tr><th class="l">Captained</th><th>Day</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Captain</th><th>Tip</th><th>To captain</th><th>To pool</th></tr></thead><tbody>${R.capRows.map((r) => `<tr><td class="l"><input type="checkbox" class="capck" data-id="${esc(r.id)}" ${r.isCap ? "checked" : ""} aria-label="Captained ${esc(r.id)}"></td><td class="l">${dow(r.date)} ${fmtDate(r.date)}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer)}</td><td class="l">${esc(r.captains.join(", ") || "not in notes")}</td><td>${money(r.tip)}</td><td>${money(r.toCap)}</td><td>${money(r.pool)}</td></tr>`).join("")}</tbody></table></div>
+        <p class="foot">Mon–Fri: captain gets the first $${CAPTAIN_WEEKDAY} of the tip, the rest goes to the pool. Sat–Sun: captain gets the whole tip. Captained bookings are found from "Captain &lt;name&gt;" in the Peek notes or the captained-tour product. Untick a booking to send its whole tip to the pool.</p></div>` : "";
     const notes = R.notes.length ? R.notes.map((n) => `<li>${esc(n)}</li>`).join("") : `<li class="ok">No issues found.</li>`;
     el.innerHTML = `
       <div class="rhead"><div><h1>Tips ${fmtDate(R.start)} – ${fmtDate(R.end)}</h1><div class="muted">Peek tips (cancelled bookings excluded) · Peek data synced ${esc(syncTxt)} · Hours from ${esc(timesheet.fileName)}</div></div>
         <div class="btns"><button class="ghost" id="xl" type="button">Download Excel</button><button class="ghost" id="pdf" type="button">Print / Save PDF</button></div></div>
-      <div class="kpis">${kp("Total online tips", money(R.total), "main")}${kp("Office 15%", money(R.officeTotal))}${kp("Docks 75%", money(R.docksTotal))}${kp(esc(R.five[0] || "5%") + " 5%", money(R.fivePct))}${kp(esc(R.five[1] || "5%") + " 5%", money(R.fivePct))}</div>
+      <div class="kpis">${kp("Total online tips", money(R.gross), "main")}${kp("To captains", money(R.captainTotal))}${kp("Pool after captains", money(R.total))}${kp("Office 15%", money(R.officeTotal))}${kp("Docks 75%", money(R.docksTotal))}${kp(esc(R.five[0] || "5%") + " 5%", money(R.fivePct))}${kp(esc(R.five[1] || "5%") + " 5%", money(R.fivePct))}</div>
       <ul class="notes">${notes}</ul>
       <div class="card"><h2>Payout</h2><div class="tablewrap"><table class="payout"><thead><tr><th>Person</th><th class="l">From</th><th>Tips</th><th>Commission</th><th>Tip + commission</th></tr></thead><tbody>${payRows}</tbody></table></div>
         <p class="foot">Docks 75% (${money(R.docksTotal)}) goes to Christian for the dock split. Office is rounded per day and the 5% shares per period, so totals can differ by a few cents.</p></div>
-      <div class="card"><h2>Daily office split</h2><div class="tablewrap"><table><thead><tr><th>Day</th><th># tips</th><th>Tips</th><th>Office 15%</th>${officeHdr}<th>${esc((R.fallback || "Fallback").split(" ")[0])} office $</th><th>Docks 75%</th><th>10% (5%+5%)</th></tr></thead><tbody>${dailyRows}${dailyTotal}</tbody></table></div>
+      ${capTable}
+      <div class="card"><h2>Daily office split</h2><div class="tablewrap"><table><thead><tr><th>Day</th><th># tips</th><th>Pool tips</th><th>Office 15%</th>${officeHdr}<th>${esc((R.fallback || "Fallback").split(" ")[0])} office $</th><th>Docks 75%</th><th>10% (5%+5%)</th></tr></thead><tbody>${dailyRows}${dailyTotal}</tbody></table></div>
         <p class="foot">Office 15% each day is split by Homebase paid hours. If nobody listed as office staff clocked in, it goes to ${esc(R.fallback || "the fallback person")}.</p></div>
       <div class="card pb"><h2>Dock pool by hours <span class="badge">Estimate for Christian</span></h2><div class="tablewrap"><table><thead><tr><th>Dock staff</th><th>Paid hrs</th><th>Tip hrs</th><th>Estimated share</th></tr></thead><tbody>${dockRows || `<tr><td class="l" colspan="4">No dock hours in this timesheet.</td></tr>`}</tbody></table></div>
-        <p class="foot">Tip hrs count only the time between the first boat out and the last boat back that day (from vQuip; Peek schedule when vQuip is missing or looks wrong).</p>
+        <p class="foot">Tip hrs count only the time between the first boat out and the last boat back that day. Out = vQuip launch. Back = scheduled Peek end, or the vQuip return if the boat came back late. Rentals not in vQuip and bad scans use their Peek times.</p>
         <h3>Dock window by day</h3><div class="tablewrap"><table><thead><tr><th>Day</th><th>First out</th><th class="l">Source</th><th>Last back</th><th class="l">Source</th><th>Docks 75%</th><th class="l">Tip hrs</th><th class="l">Fixed vQuip times</th></tr></thead><tbody>${winRows}</tbody></table></div>
         <p class="foot">Each day's 75% split by that day's tip hours (roles: ${esc(settings.dockRoles)}). Reference only. Christian's split is final.${R.dockUnassigned ? " Unassigned: " + money(R.dockUnassigned) + "." : ""}</p></div>
-      <div class="card pb"><h2>Tip detail from Peek</h2><div class="tablewrap"><table><thead><tr><th>Date</th><th class="l">Time</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Product</th><th>Tip</th></tr></thead><tbody>${detail}<tr class="total"><td class="l" colspan="5">Total</td><td>${money(R.total)}</td></tr></tbody></table></div></div>`;
+      <div class="card pb"><h2>Tip detail from Peek</h2><div class="tablewrap"><table><thead><tr><th>Date</th><th class="l">Time</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Product</th><th>Tip</th><th>To captain</th><th>To pool</th></tr></thead><tbody>${detail}<tr class="total"><td class="l" colspan="5">Total</td><td>${money(R.gross)}</td><td>${money(R.captainTotal)}</td><td>${money(R.total)}</td></tr></tbody></table></div></div>`;
     el.classList.remove("hidden");
     el.querySelectorAll(".cin").forEach((i) => i.addEventListener("change", () => {
       const n = i.dataset.name; let c = settings.comm.find((x) => matches(x.name, n));
@@ -236,6 +264,7 @@
       $("commRows").innerHTML = ""; settings.comm.forEach(commRow);
       recompute(false);
     }));
+    el.querySelectorAll(".capck").forEach((c) => c.addEventListener("change", () => { if (c.checked) capOff.delete(c.dataset.id); else capOff.add(c.dataset.id); recompute(false); }));
     $("xl").onclick = () => exportXlsx(R);
     $("pdf").onclick = () => window.print();
     if (scroll) el.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -244,7 +273,7 @@
 
   function exportXlsx(R) {
     const wb = XLSX.utils.book_new();
-    const pay = [["Person", "From", "Tips", "Commission", "Tip + Commission"], ...R.payout.map((p) => [p.name, p.parts.join(" + "), p.tips, p.comm, p.total]), [], ["Total online tips", "", R.total], ["Office 15%", "", R.officeTotal], ["Docks 75% (to Christian)", "", R.docksTotal], ["5% each", "", R.fivePct]];
+    const pay = [["Person", "From", "Tips", "Commission", "Tip + Commission"], ...R.payout.map((p) => [p.name, p.parts.join(" + "), p.tips, p.comm, p.total]), [], ["Total online tips", "", R.gross], ["To captains", "", R.captainTotal], ["Pool after captains", "", R.total], ["Office 15%", "", R.officeTotal], ["Docks 75% (to Christian)", "", R.docksTotal], ["5% each", "", R.fivePct]];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pay), "Payout");
     const hdr = ["Day", "Date", "# Tips", "Tips", "Office 15%", ...R.officeNames.flatMap((n) => [n + " hrs", n + " $"]), (R.fallback || "Fallback") + " office $", "Docks 75%", "10% (5%+5%)"];
     const dl = R.daily.map((x) => [dow(x.d), fmtDate(x.d), x.count, x.dayTips, x.office, ...x.hrs.flatMap((h) => [h.hours, x.split[h.name]]), x.fb, x.docks, x.tenth]);
@@ -253,7 +282,7 @@
     dk.push([], ["Day", "First out", "Source", "Last back", "Source", "Docks 75%", "Tip hours", "Fixed vQuip times"]);
     R.daily.filter((x) => x.win).forEach((x) => dk.push([fmtDate(x.d), x.win.first_out, x.win.out_source, x.win.last_back, x.win.back_source, x.docks, x.dockDetail, (x.win.anomalies || []).map((a) => a.id + ": " + a.why).join("; ")]));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dk), "Dock Estimate");
-    const tips = [["Date", "Time", "Booking", "Customer", "Product", "Tip"], ...R.rows.map((r) => [fmtDate(r.date), to12(r.time), r.id, r.customer, r.product, r.tip])];
+    const tips = [["Date", "Time", "Booking", "Customer", "Product", "Tip", "Captain", "To captain", "To pool"], ...R.rows.map((r) => [fmtDate(r.date), to12(r.time), r.id, r.customer, r.product, r.tip, r.isCap ? (r.captains.join(", ") || "not in notes") : "", r.toCap, r.pool])];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(tips), "Peek Tips");
     if (R.notes.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Notes"], ...R.notes.map((n) => [n])]), "Notes");
     XLSX.writeFile(wb, `NFT-Tips-${R.start}-to-${R.end}.xlsx`);
