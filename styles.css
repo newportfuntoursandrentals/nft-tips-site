@@ -105,3 +105,5 @@ td.hl{background:#fff9d6}
   .pb{break-before:page}
   h2{font-size:12pt}
 }
+
+.hbtns{display:flex;gap:8px;align-items:center}

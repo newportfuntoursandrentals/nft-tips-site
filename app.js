@@ -297,8 +297,27 @@
     $("addComm").onclick = () => commRow({ name: "", amt: "" });
 
   }
+  // Wipe the previous report and everything it was built from.
+  function clearReport() {
+    reqId++; cache = null; lastReport = null; capOff.clear();
+    const r = $("report"); r.innerHTML = ""; r.classList.add("hidden");
+  }
+  function startOver() {
+    clearReport(); timesheet = null;
+    $("csv").value = "";
+    $("drop").classList.remove("loaded");
+    $("dropTitle").textContent = dropTitle0; $("dropSub").textContent = dropSub0;
+    $("periodChips").innerHTML = `<span class="muted">Upload the CSV first.</span>`;
+    $("start").value = ""; $("end").value = "";
+    settings.comm.forEach((c) => (c.amt = "")); $("commRows").innerHTML = ""; settings.comm.forEach(commRow);
+    status("Cleared. Upload a timesheet to start a new report.");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  let reqId = 0;
+  const dropTitle0 = $("dropTitle").textContent, dropSub0 = $("dropSub").textContent;
   function handleFile(file) {
     if (!file) return;
+    clearReport(); status("Reading " + file.name + "…");
     const fr = new FileReader();
     fr.onload = () => {
       try {
@@ -310,9 +329,10 @@
       } catch (err) { timesheet = null; $("drop").classList.remove("loaded"); $("dropTitle").textContent = "Couldn't read that file"; $("dropSub").textContent = err.message; }
     };
     fr.readAsText(file);
+    $("csv").value = ""; // so choosing the same file again still reloads it
   }
-  function lock() { store.removeItem("nftTipsPw"); $("app").classList.add("hidden"); $("logout").classList.add("hidden"); $("login").classList.remove("hidden"); $("report").classList.add("hidden"); }
-  function unlocked() { $("login").classList.add("hidden"); $("app").classList.remove("hidden"); $("logout").classList.remove("hidden"); }
+  function lock() { store.removeItem("nftTipsPw"); $("app").classList.add("hidden"); $("logout").classList.add("hidden"); $("reset").classList.add("hidden"); $("login").classList.remove("hidden"); $("report").classList.add("hidden"); }
+  function unlocked() { $("login").classList.add("hidden"); $("app").classList.remove("hidden"); $("logout").classList.remove("hidden"); $("reset").classList.remove("hidden"); }
 
   $("loginForm").addEventListener("submit", async (e) => {
     e.preventDefault(); $("loginErr").classList.add("hidden");
@@ -320,7 +340,8 @@
     try { await api({ check: true }); $("pw").value = ""; unlocked(); }
     catch (err) { store.removeItem("nftTipsPw"); $("loginErr").textContent = /^Password no longer/.test(err.message) ? "Wrong password." : err.message; $("loginErr").classList.remove("hidden"); }
   });
-  $("logout").onclick = lock;
+  $("logout").onclick = () => { startOver(); lock(); };
+  $("reset").onclick = startOver;
   $("csv").addEventListener("change", (e) => handleFile(e.target.files[0]));
   const drop = $("drop");
   ["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
@@ -359,13 +380,15 @@
     const start = $("start").value, end = $("end").value;
     if (!start || !end || start > end) return status("Pick a valid start and end date.", true);
     if (!timesheet) return status("Upload the Homebase timesheet CSV first.", true);
-    save(); status("Pulling tips from Peek…");
+    save(); clearReport(); const my = reqId;
+    status(`Pulling tips from Peek for ${label(start, end)}…`);
     try {
       const data = await api({ start, end });
+      if (my !== reqId) return; // a newer request replaced this one
       cache = { start, end, rows: data.rows, windows: data.windows || {}, last_sync: data.last_sync };
       recompute(true);
       status(`${label(start, end)} · ${data.rows.length} tipped bookings from Peek.`);
-    } catch (err) { status(err.message, true); }
+    } catch (err) { if (my === reqId) status(err.message, true); }
   }
   function status(t, bad) { $("status").textContent = t; $("status").style.color = bad ? "var(--err)" : ""; }
 
