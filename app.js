@@ -99,7 +99,10 @@
     return { h: r2(Math.max(0, mins) / 60), how: "rental window" };
   }
   const CAPTAIN_WEEKDAY = 20;
-  const capOff = new Set(); // booking ids unticked as "not captained"
+  // Per-booking captain overrides, saved on this device: "rule" (default), "all" (captain keeps whole tip), "none" (all to pool)
+  const CAP_KEY = "nftTipsCapModes";
+  const capMode = (() => { try { return new Map(Object.entries(JSON.parse(window["local" + "Storage"].getItem(CAP_KEY) || "{}"))); } catch { return new Map(); } })();
+  const saveCap = () => { try { window["local" + "Storage"].setItem(CAP_KEY, JSON.stringify(Object.fromEntries(capMode))); } catch {} };
   const isWeekend = (d) => { const g = new Date(d + "T12:00:00Z").getUTCDay(); return g === 0 || g === 6; };
   function readTimesheet(text, fileName) {
     const rows = parseCSV(text);
@@ -153,10 +156,11 @@
     // Captain rule: Mon–Fri the captain gets the first $20 of the tip, the rest goes to the pool; Sat/Sun the captain gets it all.
     const capRows = [];
     rows = rows.map((r) => {
-      const isCap = Array.isArray(r.captains) && !capOff.has(r.id);
+      const mode = capMode.get(r.id) || "rule";
+      const isCap = Array.isArray(r.captains) && mode !== "none";
       const wk = isWeekend(r.date);
-      const toCap = isCap ? (wk ? r.tip : Math.min(CAPTAIN_WEEKDAY, r.tip)) : 0;
-      const x = { ...r, isCap, toCap: r2(toCap), pool: r2(r.tip - toCap) };
+      const toCap = !isCap ? 0 : mode === "all" ? r.tip : (wk ? r.tip : Math.min(CAPTAIN_WEEKDAY, r.tip));
+      const x = { ...r, isCap, mode, toCap: r2(toCap), pool: r2(r.tip - toCap) };
       if (Array.isArray(r.captains)) capRows.push(x);
       return x;
     });
@@ -213,7 +217,7 @@
     const anomalies = daily.reduce((s, x) => s + (x.win?.anomalies?.length || 0), 0);
     if (anomalies) notes.push(`${anomalies} vQuip check-out/in time${anomalies > 1 ? "s" : ""} looked wrong (test scans or scans on another day). Those bookings use their scheduled Peek time instead. Details are in the Dock window table.`);
     const nCap = capRows.filter((r) => r.isCap).length;
-    if (capRows.length) notes.push(`${nCap} captained booking${nCap === 1 ? "" : "s"} with tips found from Peek notes. Check the Captain tips table and untick any that weren't captained.`);
+    if (capRows.length) notes.push(`${nCap} captained booking${nCap === 1 ? "" : "s"} with tips found from Peek notes. Check the Captain tips table and set any exceptions in the Split column.`);
     return { start, end, rows, daily, total, gross, captainTotal, capRows, officeTotal, docksTotal, fivePct, payout, officeNames, fallback, five, dockPeople, dockUnassigned: r2(dockUnassigned), notes };
   }
 
@@ -232,8 +236,8 @@
     const winRows = R.daily.filter((x) => x.win).map((x) => { const w = x.win; const an = (w.anomalies || []).map((a) => `${a.id}: ${a.why}`).join("; ");
       return `<tr><td class="l">${dow(x.d)} ${fmtDate(x.d)}</td><td>${t12(w.first_out)}</td><td class="l muted">${esc(w.out_source || "")}</td><td>${t12(w.last_back)}</td><td class="l muted">${esc(w.back_source || "")}</td><td>${money(x.docks)}</td><td class="l">${esc(x.dockDetail || "–")}</td><td class="l muted">${esc(an || "")}</td></tr>`; }).join("");
     const detail = R.rows.map((r) => `<tr><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(to12(r.time))}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer)}</td><td class="l">${esc(r.product || "")}</td><td>${money(r.tip)}</td><td class="${r.toCap ? "hl" : "dim"}">${r.toCap ? money(r.toCap) : "–"}</td><td>${money(r.pool)}</td></tr>`).join("");
-    const capTable = R.capRows.length ? `<div class="card"><h2>Captain tips</h2><div class="tablewrap"><table><thead><tr><th class="l">Captained</th><th>Day</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Captain</th><th>Tip</th><th>To captain</th><th>To pool</th></tr></thead><tbody>${R.capRows.map((r) => `<tr><td class="l"><input type="checkbox" class="capck" data-id="${esc(r.id)}" ${r.isCap ? "checked" : ""} aria-label="Captained ${esc(r.id)}"></td><td class="l">${dow(r.date)} ${fmtDate(r.date)}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer)}</td><td class="l">${esc(r.captains.join(", ") || "not in notes")}</td><td>${money(r.tip)}</td><td>${money(r.toCap)}</td><td>${money(r.pool)}</td></tr>`).join("")}</tbody></table></div>
-        <p class="foot">Mon–Fri: captain gets the first $${CAPTAIN_WEEKDAY} of the tip, the rest goes to the pool. Sat–Sun: captain gets the whole tip. Captained bookings are found from "Captain &lt;name&gt;" in the Peek notes or the captained-tour product. Untick a booking to send its whole tip to the pool.</p></div>` : "";
+    const capTable = R.capRows.length ? `<div class="card"><h2>Captain tips</h2><div class="tablewrap"><table><thead><tr><th class="l">Split</th><th>Day</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Captain</th><th>Tip</th><th>To captain</th><th>To pool</th></tr></thead><tbody>${R.capRows.map((r) => `<tr><td class="l"><select class="capsel" data-id="${esc(r.id)}" aria-label="Captain split for ${esc(r.id)}"><option value="rule" ${r.mode === "rule" ? "selected" : ""}>Standard rule</option><option value="all" ${r.mode === "all" ? "selected" : ""}>Captain keeps all</option><option value="none" ${r.mode === "none" ? "selected" : ""}>All to pool (not captained)</option></select></td><td class="l">${dow(r.date)} ${fmtDate(r.date)}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer)}</td><td class="l">${esc(r.captains.join(", ") || "not in notes")}</td><td>${money(r.tip)}</td><td>${money(r.toCap)}</td><td>${money(r.pool)}</td></tr>`).join("")}</tbody></table></div>
+        <p class="foot">Mon–Fri: captain gets the first $${CAPTAIN_WEEKDAY} of the tip, the rest goes to the pool. Sat–Sun: captain gets the whole tip. Captained bookings are found from "Captain &lt;name&gt;" in the Peek notes or the captained-tour product. Use the Split menu for exceptions: "Captain keeps all" gives the captain the whole tip on any day, "All to pool" means it wasn't captained. Choices are saved on this device.</p></div>` : "";
     const notes = R.notes.length ? R.notes.map((n) => `<li>${esc(n)}</li>`).join("") : `<li class="ok">No issues found.</li>`;
     el.innerHTML = `
       <div class="rhead"><div><h1>Tips ${fmtDate(R.start)} – ${fmtDate(R.end)}</h1><div class="muted">Peek tips (cancelled bookings excluded) · Peek data synced ${esc(syncTxt)} · Hours from ${esc(timesheet.fileName)}</div></div>
@@ -258,7 +262,7 @@
       $("commRows").innerHTML = ""; settings.comm.forEach(commRow);
       recompute(false);
     }));
-    el.querySelectorAll(".capck").forEach((c) => c.addEventListener("change", () => { if (c.checked) capOff.delete(c.dataset.id); else capOff.add(c.dataset.id); recompute(false); }));
+    el.querySelectorAll(".capsel").forEach((c) => c.addEventListener("change", () => { if (c.value === "rule") capMode.delete(c.dataset.id); else capMode.set(c.dataset.id, c.value); saveCap(); recompute(false); }));
     $("xl").onclick = () => exportXlsx(R);
     $("pdf").onclick = () => window.print();
     if (scroll) el.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -299,7 +303,7 @@
   }
   // Wipe the previous report and everything it was built from.
   function clearReport() {
-    reqId++; cache = null; lastReport = null; capOff.clear();
+    reqId++; cache = null; lastReport = null;
     const r = $("report"); r.innerHTML = ""; r.classList.add("hidden");
   }
   function startOver() {
