@@ -171,7 +171,7 @@
     const notes = [];
     const officePay = Object.fromEntries(officeNames.map((n) => [n, 0]));
     let fallbackOffice = 0;
-    const dockPeople = {}; let dockUnassigned = 0;
+    const dockPeople = {}; let dockUnassigned = 0; const shiftFlags = [], flaggedShort = new Set();
     const daily = dayList.map((d) => {
       const dayTips = r2((tipsByDay[d] || []).reduce((s, r) => s + r.pool, 0));
       const office = r2(dayTips * 0.15), docks = r2(dayTips * 0.75), tenth = r2(dayTips * 0.10);
@@ -193,6 +193,15 @@
         const firstIn = ins.length ? Math.min(...ins) : w.back;
         cover = r2(Math.max(0, Math.min(firstIn, w.back) - w.out) / 60);
         if (cover > 0) dp.push({ name: fallback, hours: cover, cover: true });
+        // Flag dock shifts that look like clock-in mistakes.
+        shifts.filter((s) => !isOffice(s.name) && !matches(fallback, s.name) && dockRoles.includes(norm(s.role)) && s.inM !== null && s.outM !== null && s.outM > s.inM).forEach((s) => {
+          const t = `${s.name} ${hm(s.inM)}–${hm(s.outM % 1440)}`;
+          if (s.outM <= w.out) shiftFlags.push(`${dow(d)} ${fmtDate(d)}: ${t} clocked out before the first boat went out (${hm(w.out)}).`);
+          else if (s.inM >= w.back) shiftFlags.push(`${dow(d)} ${fmtDate(d)}: ${t} clocked in after the last boat came back (${hm(w.back)}).`);
+          else { const dayMin = shifts.filter((o) => o.name === s.name && o.inM !== null && o.outM !== null).reduce((m, o) => m + Math.max(0, o.outM - o.inM), 0);
+            if (dayMin < 180 && !flaggedShort.has(d + s.name)) { flaggedShort.add(d + s.name); shiftFlags.push(`${dow(d)} ${fmtDate(d)}: ${s.name} worked only ${(dayMin / 60).toFixed(2)} hrs (${shifts.filter((o) => o.name === s.name && o.inM !== null && o.outM !== null).map((o) => `${hm(o.inM)}–${hm(o.outM % 1440)}`).join(", ")}) on a day with rentals ${hm(w.out)}–${hm(w.back)}.`); } }
+        });
+        if (cover >= 1) shiftFlags.push(`${dow(d)} ${fmtDate(d)}: ${fallback} credited ${cover.toFixed(2)} dock hrs because no dock staff was clocked in from ${hm(w.out)}. Check for a missing dock clock-in.`);
       }
       Object.keys(dockPaid).forEach((n) => { (dockPeople[n] ||= { hours: 0, amt: 0, paid: 0 }); dockPeople[n].paid = (dockPeople[n].paid || 0) + dockPaid[n]; });
       const dockSplit = {};
@@ -229,6 +238,7 @@
     if (anomalies) notes.push(`${anomalies} vQuip check-out/in time${anomalies > 1 ? "s" : ""} looked wrong (test scans or scans on another day). Those bookings use their scheduled Peek time instead. Details are in the Dock window table.`);
     const nCap = capRows.filter((r) => r.isCap).length;
     if (capRows.length) notes.push(`${nCap} captained booking${nCap === 1 ? "" : "s"} with tips found from Peek notes. Check the Captain tips table and set any exceptions in the Split column.`);
+    shiftFlags.forEach((f) => notes.push(`Check shift: ${f} If this is a clock-in mistake, fix it in Homebase, export again, and re-run.`));
     const covDays = daily.filter((x) => x.cover > 0);
     if (covDays.length) notes.push(`${fallback} covered the docks before any dock staff clocked in on ${covDays.map((x) => `${fmtDate(x.d)} (${x.cover.toFixed(2)} hrs)`).join(", ")}. His dock share (${money(troyDock)}) is added to his payout and taken out of the docks amount for Christian.`);
     return { start, end, rows, daily, total, gross, troyDock, docksToChristian, captainTotal, capRows, officeTotal, docksTotal, fivePct, payout, officeNames, fallback, five, dockPeople, dockUnassigned: r2(dockUnassigned), notes };
