@@ -186,21 +186,32 @@
       const wd = windows[d]; const w = wd ? { out: toMin(wd.first_out), back: toMin(wd.last_back) } : null;
       shifts.forEach((s) => { if (!isOffice(s.name) && !(fallback && matches(fallback, s.name)) && dockRoles.includes(norm(s.role)) && s.hours > 0) { const c = dockCounted(s, w); dockShifts[s.name] = (dockShifts[s.name] || 0) + c.h; dockPaid[s.name] = (dockPaid[s.name] || 0) + s.hours; } });
       const dp = Object.entries(dockShifts).filter(([, hours]) => hours > 0).map(([name, hours]) => ({ name, hours }));
+      // Troy covers the docks from the first boat out until the first dock staff clocks in (all day if nobody does).
+      let cover = 0;
+      if (fallback && w && w.out !== null && w.back !== null && w.back > w.out) {
+        const ins = shifts.filter((s) => !isOffice(s.name) && !matches(fallback, s.name) && dockRoles.includes(norm(s.role)) && s.inM !== null && s.outM !== null && s.outM > w.out && s.inM < w.back).map((s) => s.inM);
+        const firstIn = ins.length ? Math.min(...ins) : w.back;
+        cover = r2(Math.max(0, Math.min(firstIn, w.back) - w.out) / 60);
+        if (cover > 0) dp.push({ name: fallback, hours: cover, cover: true });
+      }
       Object.keys(dockPaid).forEach((n) => { (dockPeople[n] ||= { hours: 0, amt: 0, paid: 0 }); dockPeople[n].paid = (dockPeople[n].paid || 0) + dockPaid[n]; });
       const dockSplit = {};
       if (dp.length && docks > 0) { const a = splitByHours(docks, dp); dp.forEach((p, i) => { dockSplit[p.name] = a[i]; (dockPeople[p.name] ||= { hours: 0, amt: 0, paid: 0 }); dockPeople[p.name].hours += p.hours; dockPeople[p.name].amt += a[i]; }); }
       else if (docks > 0) dockUnassigned += docks;
       dp.forEach((p) => { if (!(p.name in dockSplit)) { (dockPeople[p.name] ||= { hours: 0, amt: 0, paid: 0 }); dockPeople[p.name].hours += p.hours; } });
-      return { d, count: (tipsByDay[d] || []).length, dayTips, office, docks, tenth, hrs, split, fb, dockSplit, dockHours: dp.reduce((a, p) => a + p.hours, 0), win: wd || null, dockDetail: dp.map((p) => `${p.name.split(" ")[0]} ${p.hours.toFixed(2)}`).join(", ") };
+      return { d, cover, coverAmt: cover > 0 ? (dockSplit[fallback] || 0) : 0, count: (tipsByDay[d] || []).length, dayTips, office, docks, tenth, hrs, split, fb, dockSplit, dockHours: dp.reduce((a, p) => a + p.hours, 0), win: wd || null, dockDetail: dp.map((p) => `${p.name.split(" ")[0]} ${p.hours.toFixed(2)}`).join(", ") };
     });
     const officeTotal = r2(daily.reduce((s, x) => s + x.office, 0));
     const docksTotal = r2(total * 0.75), fivePct = r2(total * 0.05);
+    const troyDock = r2(daily.reduce((s, x) => s + x.coverAmt, 0));
+    const docksToChristian = r2(docksTotal - troyDock);
 
     // Payout
     const payout = [];
     const add = (name, tips, label) => { let p = payout.find((x) => matches(x.name, name)); if (!p) payout.push((p = { name, tips: 0, parts: [], comm: 0 })); p.tips = r2(p.tips + tips); if (label) p.parts.push(label); };
     officeNames.forEach((n) => add(n, r2(officePay[n]), "office by hours"));
     if (fallback) add(fallback, r2(fallbackOffice), "office days with no office staff");
+    if (fallback && troyDock > 0) add(fallback, troyDock, "dock coverage (no dock staff on)");
     five.forEach((n) => add(n, fivePct, "5%"));
     if (captainTotal > 0) add("Captains (total)", captainTotal, "paid on the spot");
     payout.forEach((p) => { if (p.parts.length > 1) p.parts = [...new Set(p.parts)]; });
@@ -218,7 +229,9 @@
     if (anomalies) notes.push(`${anomalies} vQuip check-out/in time${anomalies > 1 ? "s" : ""} looked wrong (test scans or scans on another day). Those bookings use their scheduled Peek time instead. Details are in the Dock window table.`);
     const nCap = capRows.filter((r) => r.isCap).length;
     if (capRows.length) notes.push(`${nCap} captained booking${nCap === 1 ? "" : "s"} with tips found from Peek notes. Check the Captain tips table and set any exceptions in the Split column.`);
-    return { start, end, rows, daily, total, gross, captainTotal, capRows, officeTotal, docksTotal, fivePct, payout, officeNames, fallback, five, dockPeople, dockUnassigned: r2(dockUnassigned), notes };
+    const covDays = daily.filter((x) => x.cover > 0);
+    if (covDays.length) notes.push(`${fallback} covered the docks before any dock staff clocked in on ${covDays.map((x) => `${fmtDate(x.d)} (${x.cover.toFixed(2)} hrs)`).join(", ")}. His dock share (${money(troyDock)}) is added to his payout and taken out of the docks amount for Christian.`);
+    return { start, end, rows, daily, total, gross, troyDock, docksToChristian, captainTotal, capRows, officeTotal, docksTotal, fivePct, payout, officeNames, fallback, five, dockPeople, dockUnassigned: r2(dockUnassigned), notes };
   }
 
   /* ---------- Render ---------- */
@@ -245,7 +258,7 @@
       <div class="kpis">${kp("Total online tips", money(R.gross), "main")}${kp("To captains", money(R.captainTotal))}${kp("Pool after captains", money(R.total))}${kp("Office 15%", money(R.officeTotal))}${kp("Docks 75%", money(R.docksTotal))}${kp(esc(R.five[0] || "5%") + " 5%", money(R.fivePct))}${kp(esc(R.five[1] || "5%") + " 5%", money(R.fivePct))}</div>
       <ul class="notes">${notes}</ul>
       <div class="card"><h2>Payout</h2><div class="tablewrap"><table class="payout"><thead><tr><th>Person</th><th class="l">From</th><th>Tips</th><th>Commission</th><th>Tip + commission</th></tr></thead><tbody>${payRows}</tbody></table></div>
-        <p class="foot">Docks 75% (${money(R.docksTotal)}) goes to Christian for the dock split. Office is rounded per day and the 5% shares per period, so totals can differ by a few cents.</p></div>
+        <p class="foot">Docks 75% is ${money(R.docksTotal)}${R.troyDock ? `; ${money(R.troyDock)} of it is ${esc(R.fallback)}'s dock coverage, so ${money(R.docksToChristian)} goes to Christian` : " and goes to Christian"} for the dock split. Office is rounded per day and the 5% shares per period, so totals can differ by a few cents.</p></div>
       ${capTable}
       <div class="card"><h2>Daily office split</h2><div class="tablewrap"><table><thead><tr><th>Day</th><th># tips</th><th>Pool tips</th><th>Office 15%</th>${officeHdr}<th>${esc((R.fallback || "Fallback").split(" ")[0])} office $</th><th>Docks 75%</th><th>10% (5%+5%)</th></tr></thead><tbody>${dailyRows}${dailyTotal}</tbody></table></div>
         <p class="foot">Office 15% each day is split by Homebase paid hours. If nobody listed as office staff clocked in, it goes to ${esc(R.fallback || "the fallback person")}.</p></div>
@@ -271,7 +284,7 @@
 
   function exportXlsx(R) {
     const wb = XLSX.utils.book_new();
-    const pay = [["Person", "From", "Tips", "Commission", "Tip + Commission"], ...R.payout.map((p) => [p.name, p.parts.join(" + "), p.tips, p.comm, p.total]), [], ["Total online tips", "", R.gross], ["To captains", "", R.captainTotal], ["Pool after captains", "", R.total], ["Office 15%", "", R.officeTotal], ["Docks 75% (to Christian)", "", R.docksTotal], ["5% each", "", R.fivePct]];
+    const pay = [["Person", "From", "Tips", "Commission", "Tip + Commission"], ...R.payout.map((p) => [p.name, p.parts.join(" + "), p.tips, p.comm, p.total]), [], ["Total online tips", "", R.gross], ["To captains", "", R.captainTotal], ["Pool after captains", "", R.total], ["Office 15%", "", R.officeTotal], ["Docks 75%", "", R.docksTotal], [(R.fallback || "Fallback") + " dock coverage", "", R.troyDock], ["Docks to Christian", "", R.docksToChristian], ["5% each", "", R.fivePct]];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pay), "Payout");
     const hdr = ["Day", "Date", "# Tips", "Tips", "Office 15%", ...R.officeNames.flatMap((n) => [n + " hrs", n + " $"]), (R.fallback || "Fallback") + " office $", "Docks 75%", "10% (5%+5%)"];
     const dl = R.daily.map((x) => [dow(x.d), fmtDate(x.d), x.count, x.dayTips, x.office, ...x.hrs.flatMap((h) => [h.hours, x.split[h.name]]), x.fb, x.docks, x.tenth]);
