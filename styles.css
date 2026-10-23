@@ -111,3 +111,5 @@ td.hl{background:#fff9d6}
 .tiny{font-size:11px;color:var(--muted,#888);margin-top:2px}
 .dimrow td{opacity:.55}
 .commsel{font-size:13px;padding:4px 6px}
+.warn{color:#9a5b00}
+.exin{width:84px;text-align:right}
