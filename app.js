@@ -17,7 +17,10 @@
     comm: [],
     commNo: "Troy McKay, Jodi Maynard",
     commRemote: "T Crawford",
-    vquipFee: "10.26",
+    vquipFee: "10",
+    taxPct: "2.5641",
+    captainFee: "",
+    captainUnit: "hour",
   };
   // Peek login name -> payout name
   const COMM_ALIAS = { "t crawford": "Tabitha" };
@@ -32,7 +35,7 @@
   function save() {
     settings.office = $("office").value; settings.fallback = $("fallback").value;
     settings.five = $("five").value; settings.dockRoles = $("dockRoles").value;
-    settings.commNo = $("commNo").value; settings.commRemote = $("commRemote").value; settings.vquipFee = $("vquipFee").value;
+    settings.commNo = $("commNo").value; settings.commRemote = $("commRemote").value; settings.vquipFee = $("vquipFee").value; settings.taxPct = $("taxPct").value; settings.captainFee = $("captainFee").value; settings.captainUnit = $("captainUnit").value;
     settings.comm = [...document.querySelectorAll(".comm")].map((r) => ({ name: r.querySelector(".cn").value, amt: r.querySelector(".ca").value }));
   }
   const list = (s) => String(s || "").split(",").map((x) => x.trim()).filter(Boolean);
@@ -135,20 +138,31 @@
   // Sales = value - tips - vQuip fee ($10.26 per boat, not on Water Rentals).
   function computeComm(bookings, ts) {
     const no = list(settings.commNo), remote = list(settings.commRemote);
-    const fee = parseFloat(settings.vquipFee) || 0;
+    const fee = parseFloat(settings.vquipFee) || 0;             // vQuip fee per boat, before tax
+    const taxF = 1 + (parseFloat(settings.taxPct) || 0) / 100;   // Peek prices = pre-tax x taxF
+    const capFee = parseFloat(settings.captainFee);              // captain fee, before tax
+    const capPerHour = settings.captainUnit !== "booking";
     const rows = [], flags = [], by = {};
     for (const b of bookings || []) {
       const tag = parseTag(b.reseller);
       const payee = tag ? tag.name : (COMM_ALIAS[norm(b.by)] || b.by);
       if (!payee || no.some((n) => matches(n, payee))) continue;
       const boats = Math.max(1, b.tickets || 1);
-      const vq = /water rental/i.test(b.product || "") ? 0 : r2(fee * boats);
+      // Sales = (amount paid - tips - typed exclusions) without tax, minus vQuip fee per boat, minus captain fee.
+      const paid = r2(b.value - (b.tip || 0) - Math.max(0, b.balance || 0));
       const excl = Math.max(0, parseFloat(commExcl.get(b.id)) || 0);
-      const base = Math.max(0, r2(b.value - (b.tip || 0) - vq - excl));
+      const preTax = r2((paid - excl) / taxF);
+      const tax = r2(paid - excl - preTax);
+      const vq = /water rental/i.test(b.product || "") ? 0 : r2(fee * boats);
+      const nCap = b.captains ? Math.max(1, b.captains.length) : 0;
+      const hrs = (b.duration || 0) / 60;
+      const capMissing = nCap > 0 && isNaN(capFee);
+      const cap = nCap > 0 && !isNaN(capFee) ? r2(capFee * nCap * (capPerHour ? hrs : 1)) : 0;
+      const base = Math.max(0, r2(preTax - vq - cap));
       const check = noteHit(b.notes);
       let auto, how;
       if (b.no_show) { auto = "none"; how = "no-show"; }
-      else if (base <= 0) { auto = "none"; how = "$0 after vQuip fee"; }
+      else if (base <= 0) { auto = "none"; how = paid <= 0 ? "nothing paid" : "$0 after fees"; }
       else if (b.source === "website") { auto = "none"; how = `website, tagged ${tag.raw}`; }
       else if (remote.some((n) => matches(n, b.by))) { auto = "out"; how = tag ? `${tag.raw} · ${b.by} login = 7%` : `${b.by} login = 7%`; }
       else if (tag) { auto = tag.where; how = tag.raw; }
@@ -170,7 +184,9 @@
         }
       }
       if (b.source === "website" && !b.no_show && !commMode.has(b.id)) flags.push(`${b.id} (trip ${fmtDate(b.date)}) was booked on the website but tagged ${tag.raw}. Not counted; set a rate in Commissions if it should be.`);
-      rows.push({ ...b, payee, base, vq, excl, check, boats, auto, how, mode, rate, comm, clocked });
+      if (capMissing && !b.no_show) flags.push(`${b.id} (${payee}, trip ${fmtDate(b.date)}) is captained (${b.captains.join(", ") || "captain product"}), but no captain fee is set in Advanced settings, so the captain fee is still in the sales amount.`);
+      if (b.balance > 0 && !b.no_show) flags.push(`${b.id} (${payee}, trip ${fmtDate(b.date)}) still shows ${money(b.balance)} owed in Peek. Commission is only on the ${money(paid)} paid.`);
+      rows.push({ ...b, payee, base, paid, preTax, tax, vq, cap, nCap, excl, check, boats, auto, how, mode, rate, comm, clocked });
       const t = (by[payee] ||= { inN: 0, inBase: 0, inComm: 0, outN: 0, outBase: 0, outComm: 0, comm: 0 });
       if (mode === "in") { t.inN++; t.inBase += base; t.inComm = r2(t.inComm + comm); } else if (mode === "out") { t.outN++; t.outBase += base; t.outComm = r2(t.outComm + comm); }
       t.comm = r2(t.comm + comm);
@@ -343,12 +359,12 @@
         <p class="foot">Mon–Fri: captain gets the first $${CAPTAIN_WEEKDAY} of the tip, the rest goes to the pool. Sat–Sun: captain gets the whole tip. Captained bookings are found from "Captain &lt;name&gt;" in the Peek notes or the captained-tour product. Use the Split menu for exceptions: "Captain keeps all" gives the captain the whole tip on any day, "All to pool" means it wasn't captained. Choices are saved on this device.</p></div>` : "";
     const howLbl = { in: "5% office", out: "7% remote", none: "No commission" };
     const cByRows = Object.entries(R.comm.by).map(([n, t]) => `<tr><td class="l">${esc(n)}</td><td>${t.inN}</td><td>${money(r2(t.inBase))}</td><td>${money(t.inComm)}</td><td>${t.outN}</td><td>${money(r2(t.outBase))}</td><td>${money(t.outComm)}</td><td>${money(t.comm)}</td></tr>`).join("");
-    const cRows = R.comm.rows.map((r) => `<tr class="${r.mode === "none" ? "dimrow" : ""}"><td class="l"><select class="commsel" data-id="${esc(r.id)}" data-auto="${r.auto}" aria-label="Commission rate for ${esc(r.id)}">${["in", "out", "none"].map((m) => `<option value="${m}" ${r.mode === m ? "selected" : ""}>${howLbl[m]}</option>`).join("")}</select></td><td class="l">${esc(r.payee)}</td><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer || "")}</td><td class="l muted">${r.booked_at ? fmtDate(r.booked_at.slice(0, 10)) + " " + to12(r.booked_at.slice(11, 16)) : ""}</td><td class="l muted">${esc(r.how)}${r.clocked === false ? " · not clocked in" : ""}${commMode.has(r.id) ? " · changed" : ""}${r.check ? `<div class="tiny warn">Check note: ${esc(r.check)}</div>` : ""}</td><td>${r.boats}</td><td><input class="exin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" aria-label="Amount to exclude for ${esc(r.id)}" data-id="${esc(r.id)}" value="${r.excl ? r.excl.toFixed(2) : ""}"></td><td>${money(r.base)}<div class="tiny">${money(r.value - (r.tip || 0))}${r.vq ? ` − ${money(r.vq)} vQuip` : ""}${r.excl ? ` − ${money(r.excl)}` : ""}</div></td><td>${r.comm ? money(r.comm) : "–"}</td></tr>`).join("");
+    const cRows = R.comm.rows.map((r) => `<tr class="${r.mode === "none" ? "dimrow" : ""}"><td class="l"><select class="commsel" data-id="${esc(r.id)}" data-auto="${r.auto}" aria-label="Commission rate for ${esc(r.id)}">${["in", "out", "none"].map((m) => `<option value="${m}" ${r.mode === m ? "selected" : ""}>${howLbl[m]}</option>`).join("")}</select></td><td class="l">${esc(r.payee)}</td><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer || "")}</td><td class="l muted">${r.booked_at ? fmtDate(r.booked_at.slice(0, 10)) + " " + to12(r.booked_at.slice(11, 16)) : ""}</td><td class="l muted">${esc(r.how)}${r.clocked === false ? " · not clocked in" : ""}${commMode.has(r.id) ? " · changed" : ""}${r.check ? `<div class="tiny warn">Check note: ${esc(r.check)}</div>` : ""}</td><td>${r.boats}</td><td><input class="exin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" aria-label="Amount to exclude for ${esc(r.id)}" data-id="${esc(r.id)}" value="${r.excl ? r.excl.toFixed(2) : ""}"></td><td>${money(r.base)}<div class="tiny">${money(r.paid)} paid${r.excl ? ` − ${money(r.excl)}` : ""} − ${money(r.tax)} tax${r.vq ? ` − ${money(r.vq)} vQuip` : ""}${r.cap ? ` − ${money(r.cap)} captain` : ""}</div></td><td>${r.comm ? money(r.comm) : "–"}</td></tr>`).join("");
     const commTotal = r2(Object.values(R.comm.by).reduce((a, t) => a + t.comm, 0));
     const chk = R.comm.rows.filter((r) => r.check && r.mode !== "none");
-    const chkTable = chk.length ? `<h3>Check for add-on time, gift certificates or deposits (${chk.length})</h3><p class="foot">Peek gives one total per booking, so these can't be split out automatically. These bookings have notes that mention them. Type the amount that shouldn't earn commission in Exclude $.</p><div class="tablewrap"><table><thead><tr><th class="l">Person</th><th class="l">Trip</th><th class="l">Booking</th><th class="l">Note</th><th>Value</th><th>Exclude $</th><th>Commission</th></tr></thead><tbody>${chk.map((r) => `<tr><td class="l">${esc(r.payee)}</td><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(r.id)}</td><td class="l muted">${esc(r.check)}</td><td>${money(r.value - (r.tip || 0))}</td><td><input class="exin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" aria-label="Amount to exclude for ${esc(r.id)}" data-id="${esc(r.id)}" value="${r.excl ? r.excl.toFixed(2) : ""}"></td><td>${money(r.comm)}</td></tr>`).join("")}</tbody></table></div>` : "";
+    const chkTable = chk.length ? `<h3>Check for add-on time, gift certificates or deposits (${chk.length})</h3><p class="foot">Peek gives one total per booking, so these can't be split out automatically. These bookings have notes that mention them. Type the amount that shouldn't earn commission in Exclude $.</p><div class="tablewrap"><table><thead><tr><th class="l">Person</th><th class="l">Trip</th><th class="l">Booking</th><th class="l">Note</th><th>Paid</th><th>Exclude $ (as in Peek, with tax)</th><th>Commission</th></tr></thead><tbody>${chk.map((r) => `<tr><td class="l">${esc(r.payee)}</td><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(r.id)}</td><td class="l muted">${esc(r.check)}</td><td>${money(r.paid)}</td><td><input class="exin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" aria-label="Amount to exclude for ${esc(r.id)}" data-id="${esc(r.id)}" value="${r.excl ? r.excl.toFixed(2) : ""}"></td><td>${money(r.comm)}</td></tr>`).join("")}</tbody></table></div>` : "";
     const commCard = R.comm.rows.length ? `<div class="card pb"><h2>Commissions</h2><div class="tablewrap"><table><thead><tr><th>Person</th><th>Office #</th><th>Office sales</th><th>5%</th><th>Remote #</th><th>Remote sales</th><th>7%</th><th>Commission</th></tr></thead><tbody>${cByRows}<tr class="total"><td class="l" colspan="7">Total</td><td>${money(commTotal)}</td></tr></tbody></table></div>
-        <p class="foot">Staff-made Peek bookings with a trip date in this period (cancelled excluded; no-shows and $0 bookings get no commission). Sales = booking value minus tips minus the vQuip fee (${money(parseFloat(settings.vquipFee) || 0)} per boat; none on Water Rentals). The Peek sales-agent tag decides who gets credit and the rate: In-Office = 5%, Remote = 7% (Nicole C. is paid as Tabitha). Bookings without a tag: phone app or ${esc(settings.commRemote)} = 7%, office computer = 5%. Not counted: ${esc(settings.commNo)}, customer website bookings, and amounts typed in Exclude $ (add-on time, gift certificates, deposits).</p>
+        <p class="foot">Staff-made Peek bookings with a trip date in this period (cancelled excluded; no-shows and $0 bookings get no commission). Sales = amount paid in Peek (minus tips and anything owed), without tax (${esc(settings.taxPct)}%), minus the vQuip fee (${money(parseFloat(settings.vquipFee) || 0)} per boat before tax; none on Water Rentals), minus captain fees (${isNaN(parseFloat(settings.captainFee)) ? "not set yet" : money(parseFloat(settings.captainFee)) + (settings.captainUnit === "booking" ? " per captain per booking" : " per captain per hour")}). The Peek sales-agent tag decides who gets credit and the rate: In-Office = 5%, Remote = 7% (Nicole C. is paid as Tabitha). Bookings without a tag: phone app or ${esc(settings.commRemote)} = 7%, office computer = 5%. Not counted: ${esc(settings.commNo)}, customer website bookings, and amounts typed in Exclude $ (add-on time, gift certificates, deposits).</p>
         ${chkTable}
         <details><summary>Commission bookings (${R.comm.rows.length})</summary><div class="tablewrap"><table><thead><tr><th class="l">Rate</th><th class="l">Person</th><th class="l">Trip</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Booked</th><th class="l">How</th><th>Boats</th><th>Exclude $</th><th>Sales</th><th>Commission</th></tr></thead><tbody>${cRows}</tbody></table></div>
         <p class="foot">Change a booking's rate with its menu. Changes are saved on this device.</p></details></div>` : "";
@@ -399,7 +415,7 @@
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dk), "Dock Estimate");
     const tips = [["Date", "Time", "Booking", "Customer", "Product", "Tip", "Captain", "To captain", "To pool"], ...R.rows.map((r) => [fmtDate(r.date), to12(r.time), r.id, r.customer, r.product, r.tip, r.isCap ? (r.captains.join(", ") || "not in notes") : "", r.toCap, r.pool])];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(tips), "Peek Tips");
-    const cm = [["Person", "Trip date", "Booking", "Customer", "Booked at", "Peek tag / how", "Boats", "Value", "Tips", "vQuip fee", "Excluded", "Sales", "Rate", "Commission", "Check note"], ...R.comm.rows.map((r) => [r.payee, fmtDate(r.date), r.id, r.customer, r.booked_at || "", r.how, r.boats, r.value, r.tip || 0, r.vq, r.excl, r.base, r.rate, r.comm, r.check])];
+    const cm = [["Person", "Trip date", "Booking", "Customer", "Booked at", "Peek tag / how", "Boats", "Value", "Tips", "Owed", "Paid", "Excluded", "Tax", "vQuip fee", "Captain fee", "Sales", "Rate", "Commission", "Check note"], ...R.comm.rows.map((r) => [r.payee, fmtDate(r.date), r.id, r.customer, r.booked_at || "", r.how, r.boats, r.value, r.tip || 0, r.balance || 0, r.paid, r.excl, r.tax, r.vq, r.cap, r.base, r.rate, r.comm, r.check])];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cm), "Commissions");
     if (R.notes.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Notes"], ...R.notes.map((n) => [n])]), "Notes");
     XLSX.writeFile(wb, `NFT-Tips-${R.start}-to-${R.end}.xlsx`);
@@ -415,9 +431,9 @@
   }
   function initSettings() {
     $("office").value = settings.office; $("fallback").value = settings.fallback; $("five").value = settings.five; $("dockRoles").value = settings.dockRoles;
-    $("commNo").value = settings.commNo; $("commRemote").value = settings.commRemote; $("vquipFee").value = settings.vquipFee;
+    $("commNo").value = settings.commNo; $("commRemote").value = settings.commRemote; $("vquipFee").value = settings.vquipFee; $("taxPct").value = settings.taxPct; $("captainFee").value = settings.captainFee; $("captainUnit").value = settings.captainUnit;
     $("commRows").innerHTML = ""; settings.comm.forEach(commRow);
-    ["office", "fallback", "five", "dockRoles", "commNo", "commRemote", "vquipFee"].forEach((id) => $(id).addEventListener("change", save));
+    ["office", "fallback", "five", "dockRoles", "commNo", "commRemote", "vquipFee", "taxPct", "captainFee", "captainUnit"].forEach((id) => $(id).addEventListener("change", save));
     $("addComm").onclick = () => commRow({ name: "", amt: "" });
 
   }
