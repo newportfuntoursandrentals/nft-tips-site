@@ -113,3 +113,9 @@ td.hl{background:#fff9d6}
 .commsel{font-size:13px;padding:4px 6px}
 .warn{color:#9a5b00}
 .exin{width:84px;text-align:right}
+.views{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:0 0 18px}
+.viewbtn{padding:16px 12px;font-size:17px;font-weight:600;border:2px solid var(--line);background:#fff;color:var(--navy);border-radius:12px;cursor:pointer}
+.viewbtn:hover{border-color:var(--teal)}
+.viewbtn.on{background:var(--navy);color:#fff;border-color:var(--navy)}
+#report[data-view="tips"] .v-comm,#report[data-view="tips"] .c-comm,#report[data-view="comm"] .v-tips{display:none!important}
+@media print{.views{display:none!important}}

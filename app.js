@@ -349,7 +349,7 @@
     const dailyRows = R.daily.map((x) => `<tr><td class="l">${dow(x.d)} ${fmtDate(x.d)}</td><td>${x.count || ""}</td><td>${money(x.dayTips)}</td><td>${money(x.office)}</td>${x.hrs.map((h) => `<td class="${h.hours ? "" : "dim"}">${h.hours ? h.hours.toFixed(2) : "–"}</td><td class="${x.split[h.name] ? "hl" : "dim"}">${x.split[h.name] ? money(x.split[h.name]) : "–"}</td>`).join("")}<td class="${x.fb ? "hl" : "dim"}">${x.fb ? money(x.fb) : "–"}</td><td>${money(x.docks)}</td><td>${money(x.tenth)}</td></tr>`).join("");
     const sum = (f) => R.daily.reduce((s, x) => s + f(x), 0);
     const dailyTotal = `<tr class="total"><td class="l">Total</td><td>${R.rows.length}</td><td>${money(R.total)}</td><td>${money(R.officeTotal)}</td>${R.officeNames.map((n, i) => `<td>${sum((x) => x.hrs[i].hours).toFixed(2)}</td><td>${money(r2(sum((x) => x.split[n])))}</td>`).join("")}<td>${money(r2(sum((x) => x.fb)))}</td><td>${money(r2(sum((x) => x.docks)))}</td><td>${money(r2(sum((x) => x.tenth)))}</td></tr>`;
-    const payRows = R.payout.map((p) => `<tr><td class="l">${esc(p.name)}</td><td class="l muted">${esc(p.parts.join(" + ") || (p.comm ? "commission only" : ""))}</td><td>${money(p.tips)}</td><td><input class="cin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="$0.00" aria-label="Commission for ${esc(p.name)}" data-name="${esc(p.name)}" value="${p.comm ? p.comm.toFixed(2) : ""}">${p.manual ? `<div class="tiny">typed (auto ${money(p.autoComm || 0)})</div>` : ""}</td><td>${money(p.total)}</td></tr>`).join("");
+    const payRows = R.payout.map((p) => `<tr><td class="l">${esc(p.name)}</td><td class="l muted">${esc(p.parts.join(" + ") || (p.comm ? "commission only" : ""))}</td><td>${money(p.tips)}</td><td class="c-comm"><input class="cin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="$0.00" aria-label="Commission for ${esc(p.name)}" data-name="${esc(p.name)}" value="${p.comm ? p.comm.toFixed(2) : ""}">${p.manual ? `<div class="tiny">typed (auto ${money(p.autoComm || 0)})</div>` : ""}</td><td class="c-comm">${money(p.total)}</td></tr>`).join("");
     const dockRows = Object.entries(R.dockPeople).sort((a, b) => b[1].amt - a[1].amt).map(([n, v]) => `<tr><td class="l">${esc(n)}</td><td>${(v.paid || 0).toFixed(2)}</td><td>${v.hours.toFixed(2)}</td><td>${money(r2(v.amt))}</td></tr>`).join("");
     const t12 = (t) => (t ? hm(toMin(t)) : "–");
     const winRows = R.daily.filter((x) => x.win).map((x) => { const w = x.win; const an = (w.anomalies || []).map((a) => `${a.id}: ${a.why}`).join("; ");
@@ -368,23 +368,27 @@
         ${chkTable}
         <details><summary>Commission bookings (${R.comm.rows.length})</summary><div class="tablewrap"><table><thead><tr><th class="l">Rate</th><th class="l">Person</th><th class="l">Trip</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Booked</th><th class="l">How</th><th>Boats</th><th>Exclude $</th><th>Sales</th><th>Commission</th></tr></thead><tbody>${cRows}</tbody></table></div>
         <p class="foot">Change a booking's rate with its menu. Changes are saved on this device.</p></details></div>` : "";
-    const notes = R.notes.length ? R.notes.map((n) => `<li>${esc(n)}</li>`).join("") : `<li class="ok">No issues found.</li>`;
+    const notes = R.notes.length ? R.notes.map((n) => `<li class="${/^Check commission/.test(n) ? "v-comm" : "v-tips"}">${esc(n)}</li>`).join("") : `<li class="ok">No issues found.</li>`;
     el.innerHTML = `
-      <div class="rhead"><div><h1>Tips ${fmtDate(R.start)} – ${fmtDate(R.end)}</h1><div class="muted">Peek tips (cancelled bookings excluded) · Peek data synced ${esc(syncTxt)} · Hours from ${esc(timesheet.fileName)}</div></div>
+      <div class="rhead"><div><h1><span class="v-tips">Tips</span><span class="v-comm">Commissions</span> ${fmtDate(R.start)} – ${fmtDate(R.end)}</h1><div class="muted"><span class="v-tips">Peek tips</span><span class="v-comm">Peek staff bookings by trip date</span> (cancelled bookings excluded) · Peek data synced ${esc(syncTxt)} · Hours from ${esc(timesheet.fileName)}</div></div>
         <div class="btns"><button class="ghost" id="xl" type="button">Download Excel</button><button class="ghost" id="pdf" type="button">Print / Save PDF</button></div></div>
-      <div class="kpis">${kp("Total online tips", money(R.gross), "main")}${kp("To captains", money(R.captainTotal))}${kp("Pool after captains", money(R.total))}${kp("Office 15%", money(R.officeTotal))}${kp("Docks 75%", money(R.docksTotal))}${kp(esc(R.five[0] || "5%") + " 5%", money(R.fivePct))}${kp(esc(R.five[1] || "5%") + " 5%", money(R.fivePct))}</div>
+      <div class="kpis v-comm">${kp("Total commission", money(commTotal), "main")}${Object.entries(R.comm.by).map(([n, t]) => kp(esc(n), money(t.comm))).join("")}${kp("Bookings to check", String(chk.length + R.comm.flags.length))}</div>
+      <div class="kpis v-tips">${kp("Total online tips", money(R.gross), "main")}${kp("To captains", money(R.captainTotal))}${kp("Pool after captains", money(R.total))}${kp("Office 15%", money(R.officeTotal))}${kp("Docks 75%", money(R.docksTotal))}${kp(esc(R.five[0] || "5%") + " 5%", money(R.fivePct))}${kp(esc(R.five[1] || "5%") + " 5%", money(R.fivePct))}</div>
       <ul class="notes">${notes}</ul>
-      <div class="card"><h2>Payout</h2><div class="tablewrap"><table class="payout"><thead><tr><th>Person</th><th class="l">From</th><th>Tips</th><th>Commission</th><th>Tip + commission</th></tr></thead><tbody>${payRows}</tbody></table></div>
+      <div class="card"><h2>Payout</h2><div class="tablewrap"><table class="payout"><thead><tr><th>Person</th><th class="l">From</th><th>Tips</th><th class="c-comm">Commission</th><th class="c-comm">Tip + commission</th></tr></thead><tbody>${payRows}</tbody></table></div>
         <p class="foot">Docks 75% is ${money(R.docksTotal)}${R.troyDock ? `; ${money(R.troyDock)} of it is ${esc(R.fallback)}'s dock coverage, so ${money(R.docksToChristian)} goes to Christian` : " and goes to Christian"} for the dock split. Office is rounded per day and the 5% shares per period, so totals can differ by a few cents.</p></div>
-      ${capTable}
-      ${commCard}
+      <div class="v-tips">${capTable}</div>
+      <div class="v-comm">${commCard || `<div class="card"><p>No staff bookings with commission in this period.</p></div>`}</div>
+      <div class="v-tips">
       <div class="card"><h2>Daily office split</h2><div class="tablewrap"><table><thead><tr><th>Day</th><th># tips</th><th>Pool tips</th><th>Office 15%</th>${officeHdr}<th>${esc((R.fallback || "Fallback").split(" ")[0])} office $</th><th>Docks 75%</th><th>10% (5%+5%)</th></tr></thead><tbody>${dailyRows}${dailyTotal}</tbody></table></div>
         <p class="foot">Office 15% each day is split by Homebase paid hours. If nobody listed as office staff clocked in, it goes to ${esc(R.fallback || "the fallback person")}.</p></div>
       <div class="card pb"><h2>Dock pool by hours <span class="badge">Estimate for Christian</span></h2><div class="tablewrap"><table><thead><tr><th>Dock staff</th><th>Paid hrs</th><th>Tip hrs</th><th>Estimated share</th></tr></thead><tbody>${dockRows || `<tr><td class="l" colspan="4">No dock hours in this timesheet.</td></tr>`}</tbody></table></div>
         <p class="foot">Tip hrs count only the time between the first boat out and the last boat back that day. Out = vQuip launch. Back = scheduled Peek end, or the vQuip return if the boat came back late. Rentals not in vQuip and bad scans use their Peek times.</p>
         <h3>Dock window by day</h3><div class="tablewrap"><table><thead><tr><th>Day</th><th>First out</th><th class="l">Source</th><th>Last back</th><th class="l">Source</th><th>Docks 75%</th><th class="l">Tip hrs</th><th class="l">Fixed vQuip times</th></tr></thead><tbody>${winRows}</tbody></table></div>
         <p class="foot">Each day's 75% split by that day's tip hours (roles: ${esc(settings.dockRoles)}). Reference only. Christian's split is final.${R.dockUnassigned ? " Unassigned: " + money(R.dockUnassigned) + "." : ""}</p></div>
-      <div class="card pb"><h2>Tip detail from Peek</h2><div class="tablewrap"><table><thead><tr><th>Date</th><th class="l">Time</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Product</th><th>Tip</th><th>To captain</th><th>To pool</th></tr></thead><tbody>${detail}<tr class="total"><td class="l" colspan="5">Total</td><td>${money(R.gross)}</td><td>${money(R.captainTotal)}</td><td>${money(R.total)}</td></tr></tbody></table></div></div>`;
+      <div class="card pb"><h2>Tip detail from Peek</h2><div class="tablewrap"><table><thead><tr><th>Date</th><th class="l">Time</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Product</th><th>Tip</th><th>To captain</th><th>To pool</th></tr></thead><tbody>${detail}<tr class="total"><td class="l" colspan="5">Total</td><td>${money(R.gross)}</td><td>${money(R.captainTotal)}</td><td>${money(R.total)}</td></tr></tbody></table></div></div>
+      </div>`;
+    el.dataset.view = view;
     el.classList.remove("hidden");
     el.querySelectorAll(".cin").forEach((i) => i.addEventListener("change", () => {
       const n = i.dataset.name; let c = settings.comm.find((x) => matches(x.name, n));
@@ -454,6 +458,17 @@
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
   let reqId = 0;
+  let view = (() => { try { return window["local" + "Storage"].getItem("nftView") === "comm" ? "comm" : "tips"; } catch { return "tips"; } })();
+  function setView(v) {
+    view = v; try { window["local" + "Storage"].setItem("nftView", v); } catch {}
+    document.querySelectorAll(".viewbtn").forEach((b) => { const on = b.dataset.view === v; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on); });
+    $("introTitle").textContent = v === "comm" ? "Commissions Report" : "Tips Report";
+    $("introSub").textContent = v === "comm" ? "Upload the Homebase timesheet export and get commissions on staff bookings. Bookings come from Peek automatically." : "Upload the Homebase timesheet export and get the tip split. Tips come from Peek automatically.";
+    document.title = v === "comm" ? "NFT Commissions Report" : "NFT Tips Report";
+    $("report").dataset.view = v;
+  }
+  document.querySelectorAll(".viewbtn").forEach((b) => (b.onclick = () => setView(b.dataset.view)));
+  setView(view);
   const dropTitle0 = $("dropTitle").textContent, dropSub0 = $("dropSub").textContent;
   function handleFile(file) {
     if (!file) return;

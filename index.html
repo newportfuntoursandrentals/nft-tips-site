@@ -6,7 +6,7 @@
 <meta name="robots" content="noindex, nofollow">
 <title>NFT Tips Report</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b3a53'/%3E%3Cpath d='M6 19c3 3 7 3 10 0s7-3 10 0' stroke='%2350c8c6' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='11' r='3.5' fill='%23fff'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="styles.css?v=20261023d">
+<link rel="stylesheet" href="styles.css?v=20261023e">
 </head>
 <body>
 <header class="top">
@@ -16,7 +16,7 @@
       <path d="M7 24c4 4 9 4 13 0s9-4 13 0" stroke="#50c8c6" stroke-width="3.5" stroke-linecap="round"/>
       <circle cx="20" cy="14" r="4.5" fill="#fff"/>
     </svg>
-    <div><div class="brand-name">Newport Fun Tours</div><div class="brand-sub">Tips report</div></div>
+    <div><div class="brand-name">Newport Fun Tours</div><div class="brand-sub">Tips &amp; commissions</div></div>
   </div>
   <div class="hbtns"><button id="reset" class="ghost hidden" type="button" title="Clear the report and timesheet">Start over</button><button id="logout" class="ghost hidden" type="button">Lock</button></div>
 </header>
@@ -37,9 +37,13 @@
 
   <!-- APP -->
   <section id="app" class="hidden">
+    <div class="views" role="group" aria-label="Report">
+      <button type="button" class="viewbtn on" data-view="tips" aria-pressed="true">Tips</button>
+      <button type="button" class="viewbtn" data-view="comm" aria-pressed="false">Commissions</button>
+    </div>
     <div class="intro">
-      <h1>Tips Report</h1>
-      <p class="muted">Upload the Homebase timesheet export and get the tip split. Tips come from Peek automatically.</p>
+      <h1 id="introTitle">Tips Report</h1>
+      <p class="muted" id="introSub">Upload the Homebase timesheet export and get the tip split. Tips come from Peek automatically.</p>
     </div>
 
     <div class="card step">
@@ -96,6 +100,6 @@
   </section>
 </main>
 <script src="xlsx.full.min.js"></script>
-<script src="app.js?v=20261023d"></script>
+<script src="app.js?v=20261023e"></script>
 </body>
 </html>
