@@ -14,8 +14,13 @@
     fallback: "Troy McKay",
     five: "Troy McKay, Tabitha",
     dockRoles: "Dock, ON CALL",
-    comm: [{ name: "Rosa Hernandez", amt: "" }, { name: "Annie", amt: "" }],
+    comm: [],
+    commNo: "Troy McKay, Jodi Maynard",
+    commRemote: "T Crawford",
   };
+  // Peek login name -> payout name
+  const COMM_ALIAS = { "t crawford": "Tabitha" };
+  const IN_RATE = 0.05, OUT_RATE = 0.07;
   let settings = load();
   let timesheet = null; // {byDate: {date: [{name, role, hours}]}, dates:Set, fileName}
   let lastReport = null;
@@ -26,6 +31,7 @@
   function save() {
     settings.office = $("office").value; settings.fallback = $("fallback").value;
     settings.five = $("five").value; settings.dockRoles = $("dockRoles").value;
+    settings.commNo = $("commNo").value; settings.commRemote = $("commRemote").value;
     settings.comm = [...document.querySelectorAll(".comm")].map((r) => ({ name: r.querySelector(".cn").value, amt: r.querySelector(".ca").value }));
   }
   const list = (s) => String(s || "").split(",").map((x) => x.trim()).filter(Boolean);
@@ -103,6 +109,50 @@
   const CAP_KEY = "nftTipsCapModes";
   const capMode = (() => { try { return new Map(Object.entries(JSON.parse(window["local" + "Storage"].getItem(CAP_KEY) || "{}"))); } catch { return new Map(); } })();
   const saveCap = () => { try { window["local" + "Storage"].setItem(CAP_KEY, JSON.stringify(Object.fromEntries(capMode))); } catch {} };
+  // Per-booking commission overrides, saved on this device: "in" (5%), "out" (7%), "none"
+  const COMM_KEY = "nftTipsCommModes";
+  const commMode = (() => { try { return new Map(Object.entries(JSON.parse(window["local" + "Storage"].getItem(COMM_KEY) || "{}"))); } catch { return new Map(); } })();
+  const saveCommModes = () => { try { window["local" + "Storage"].setItem(COMM_KEY, JSON.stringify(Object.fromEntries(commMode))); } catch {} };
+  // Commission on staff-made bookings by trip date. Phone app or remote login = 7%, office computer = 5%.
+  function computeComm(bookings, ts) {
+    const no = list(settings.commNo), remote = list(settings.commRemote);
+    const rows = [], flags = [], by = {};
+    for (const b of bookings || []) {
+      if (!b.by || no.some((n) => matches(n, b.by))) continue;
+      const payee = COMM_ALIAS[norm(b.by)] || b.by;
+      const base = r2(b.value - (b.tip || 0));
+      let auto, how;
+      if (b.no_show) { auto = "none"; how = "no-show"; }
+      else if (base <= 0) { auto = "none"; how = "$0 booking"; }
+      else if (remote.some((n) => matches(n, b.by))) { auto = "out"; how = "remote only"; }
+      else if (/remote/i.test(b.by)) { auto = "out"; how = "remote login"; }
+      else if (b.source && b.source !== "backend") { auto = "out"; how = "booked on phone"; }
+      else { auto = "in"; how = "office computer"; }
+      const mode = commMode.get(b.id) || auto;
+      const rate = mode === "in" ? IN_RATE : mode === "out" ? OUT_RATE : 0;
+      const comm = r2(base * rate);
+      // Flag office-computer bookings made while the person wasn't clocked in on Homebase.
+      let clocked = null;
+      if (auto === "in" && b.booked_at && ts) {
+        const bd = b.booked_at.slice(0, 10), bm = toMin(b.booked_at.slice(11, 16));
+        if (bd >= ts.first && bd <= ts.last) {
+          const prev = ymdAdd(bd, -1);
+          clocked = (ts.byDate[bd] || []).some((x) => matches(x.name, b.by) && x.inM !== null && x.outM !== null && bm >= x.inM && bm <= x.outM)
+            || (ts.byDate[prev] || []).some((x) => matches(x.name, b.by) && x.outM > 1440 && bm + 1440 <= x.outM);
+          const onHB = Object.values(ts.byDate).some((arr) => arr.some((x) => matches(x.name, b.by)));
+          if (!onHB) clocked = null;
+          if (clocked === false && !commMode.has(b.id)) flags.push(`${b.id} (${b.by}, trip ${fmtDate(b.date)}) was made on the office computer at ${to12(b.booked_at.slice(11, 16))} on ${fmtDate(bd)}, when ${b.by.split(" ")[0]} wasn't clocked in. Counted at 5%; change it to 7% in Commissions if it was remote.`);
+        }
+      }
+      rows.push({ ...b, payee, base, auto, how, mode, rate, comm, clocked });
+      const t = (by[payee] ||= { inN: 0, inBase: 0, inComm: 0, outN: 0, outBase: 0, outComm: 0, comm: 0 });
+      if (mode === "in") { t.inN++; t.inBase += base; t.inComm = r2(t.inComm + comm); } else if (mode === "out") { t.outN++; t.outBase += base; t.outComm = r2(t.outComm + comm); }
+      t.comm = r2(t.comm + comm);
+    }
+    rows.sort((a, b) => a.payee.localeCompare(b.payee) || a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+    return { rows, flags, by };
+  }
+  const ymdAdd = (d, n) => { const x = new Date(d + "T12:00:00Z"); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
   const isWeekend = (d) => { const g = new Date(d + "T12:00:00Z").getUTCDay(); return g === 0 || g === 6; };
   function readTimesheet(text, fileName) {
     const rows = parseCSV(text);
@@ -147,8 +197,9 @@
   }
 
   /* ---------- Calculation ---------- */
-  function compute(start, end, rows, ts, windows) {
+  function compute(start, end, rows, ts, windows, staffBookings) {
     windows = windows || {};
+    const C = computeComm(staffBookings, ts);
     const officeNames = list(settings.office), fallback = settings.fallback.trim(), five = list(settings.five);
     const dockRoles = list(settings.dockRoles).map(norm);
     const isOffice = (n) => officeNames.some((o) => matches(o, n));
@@ -224,7 +275,9 @@
     five.forEach((n) => add(n, fivePct, "5%"));
     if (captainTotal > 0) add("Captains (total)", captainTotal, "paid on the spot");
     payout.forEach((p) => { if (p.parts.length > 1) p.parts = [...new Set(p.parts)]; });
-    settings.comm.forEach((c) => { const a = parseFloat(c.amt); if (c.name.trim()) { add(c.name.trim(), 0); const p = payout.find((x) => matches(x.name, c.name.trim())); p.comm = r2(p.comm + (isNaN(a) ? 0 : a)); } });
+    Object.entries(C.by).forEach(([n, t]) => { if (t.comm > 0) { add(n, 0); const p = payout.find((x) => matches(x.name, n)); p.autoComm = r2((p.autoComm || 0) + t.comm); } });
+    payout.forEach((p) => (p.comm = p.autoComm || 0));
+    settings.comm.forEach((c) => { const a = parseFloat(c.amt); if (c.name.trim() && c.amt !== "" && !isNaN(a)) { add(c.name.trim(), 0); const p = payout.find((x) => matches(x.name, c.name.trim())); p.comm = r2(a); p.manual = true; } });
     payout.forEach((p) => (p.total = r2(p.tips + p.comm)));
 
     // Checks
@@ -241,7 +294,8 @@
     shiftFlags.forEach((f) => notes.push(`Check shift: ${f} If this is a clock-in mistake, fix it in Homebase, export again, and re-run.`));
     const covDays = daily.filter((x) => x.cover > 0);
     if (covDays.length) notes.push(`${fallback} covered the docks before any dock staff clocked in on ${covDays.map((x) => `${fmtDate(x.d)} (${x.cover.toFixed(2)} hrs)`).join(", ")}. His dock share (${money(troyDock)}) is added to his payout and taken out of the docks amount for Christian.`);
-    return { start, end, rows, daily, total, gross, troyDock, docksToChristian, captainTotal, capRows, officeTotal, docksTotal, fivePct, payout, officeNames, fallback, five, dockPeople, dockUnassigned: r2(dockUnassigned), notes };
+    C.flags.forEach((f) => notes.push(`Check commission: ${f}`));
+    return { comm: C, start, end, rows, daily, total, gross, troyDock, docksToChristian, captainTotal, capRows, officeTotal, docksTotal, fivePct, payout, officeNames, fallback, five, dockPeople, dockUnassigned: r2(dockUnassigned), notes };
   }
 
   /* ---------- Render ---------- */
@@ -253,7 +307,7 @@
     const dailyRows = R.daily.map((x) => `<tr><td class="l">${dow(x.d)} ${fmtDate(x.d)}</td><td>${x.count || ""}</td><td>${money(x.dayTips)}</td><td>${money(x.office)}</td>${x.hrs.map((h) => `<td class="${h.hours ? "" : "dim"}">${h.hours ? h.hours.toFixed(2) : "–"}</td><td class="${x.split[h.name] ? "hl" : "dim"}">${x.split[h.name] ? money(x.split[h.name]) : "–"}</td>`).join("")}<td class="${x.fb ? "hl" : "dim"}">${x.fb ? money(x.fb) : "–"}</td><td>${money(x.docks)}</td><td>${money(x.tenth)}</td></tr>`).join("");
     const sum = (f) => R.daily.reduce((s, x) => s + f(x), 0);
     const dailyTotal = `<tr class="total"><td class="l">Total</td><td>${R.rows.length}</td><td>${money(R.total)}</td><td>${money(R.officeTotal)}</td>${R.officeNames.map((n, i) => `<td>${sum((x) => x.hrs[i].hours).toFixed(2)}</td><td>${money(r2(sum((x) => x.split[n])))}</td>`).join("")}<td>${money(r2(sum((x) => x.fb)))}</td><td>${money(r2(sum((x) => x.docks)))}</td><td>${money(r2(sum((x) => x.tenth)))}</td></tr>`;
-    const payRows = R.payout.map((p) => `<tr><td class="l">${esc(p.name)}</td><td class="l muted">${esc(p.parts.join(" + ") || (p.comm ? "commission only" : ""))}</td><td>${money(p.tips)}</td><td><input class="cin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="$0.00" aria-label="Commission for ${esc(p.name)}" data-name="${esc(p.name)}" value="${p.comm ? p.comm.toFixed(2) : ""}"></td><td>${money(p.total)}</td></tr>`).join("");
+    const payRows = R.payout.map((p) => `<tr><td class="l">${esc(p.name)}</td><td class="l muted">${esc(p.parts.join(" + ") || (p.comm ? "commission only" : ""))}</td><td>${money(p.tips)}</td><td><input class="cin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="$0.00" aria-label="Commission for ${esc(p.name)}" data-name="${esc(p.name)}" value="${p.comm ? p.comm.toFixed(2) : ""}">${p.manual ? `<div class="tiny">typed (auto ${money(p.autoComm || 0)})</div>` : ""}</td><td>${money(p.total)}</td></tr>`).join("");
     const dockRows = Object.entries(R.dockPeople).sort((a, b) => b[1].amt - a[1].amt).map(([n, v]) => `<tr><td class="l">${esc(n)}</td><td>${(v.paid || 0).toFixed(2)}</td><td>${v.hours.toFixed(2)}</td><td>${money(r2(v.amt))}</td></tr>`).join("");
     const t12 = (t) => (t ? hm(toMin(t)) : "–");
     const winRows = R.daily.filter((x) => x.win).map((x) => { const w = x.win; const an = (w.anomalies || []).map((a) => `${a.id}: ${a.why}`).join("; ");
@@ -261,6 +315,14 @@
     const detail = R.rows.map((r) => `<tr><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(to12(r.time))}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer)}</td><td class="l">${esc(r.product || "")}</td><td>${money(r.tip)}</td><td class="${r.toCap ? "hl" : "dim"}">${r.toCap ? money(r.toCap) : "–"}</td><td>${money(r.pool)}</td></tr>`).join("");
     const capTable = R.capRows.length ? `<div class="card"><h2>Captain tips</h2><div class="tablewrap"><table><thead><tr><th class="l">Split</th><th>Day</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Captain</th><th>Tip</th><th>To captain</th><th>To pool</th></tr></thead><tbody>${R.capRows.map((r) => `<tr><td class="l"><select class="capsel" data-id="${esc(r.id)}" aria-label="Captain split for ${esc(r.id)}"><option value="rule" ${r.mode === "rule" ? "selected" : ""}>Standard rule</option><option value="all" ${r.mode === "all" ? "selected" : ""}>Captain keeps all</option><option value="none" ${r.mode === "none" ? "selected" : ""}>All to pool (not captained)</option></select></td><td class="l">${dow(r.date)} ${fmtDate(r.date)}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer)}</td><td class="l">${esc(r.captains.join(", ") || "not in notes")}</td><td>${money(r.tip)}</td><td>${money(r.toCap)}</td><td>${money(r.pool)}</td></tr>`).join("")}</tbody></table></div>
         <p class="foot">Mon–Fri: captain gets the first $${CAPTAIN_WEEKDAY} of the tip, the rest goes to the pool. Sat–Sun: captain gets the whole tip. Captained bookings are found from "Captain &lt;name&gt;" in the Peek notes or the captained-tour product. Use the Split menu for exceptions: "Captain keeps all" gives the captain the whole tip on any day, "All to pool" means it wasn't captained. Choices are saved on this device.</p></div>` : "";
+    const howLbl = { in: "5% office", out: "7% remote", none: "No commission" };
+    const cByRows = Object.entries(R.comm.by).map(([n, t]) => `<tr><td class="l">${esc(n)}</td><td>${t.inN}</td><td>${money(r2(t.inBase))}</td><td>${money(t.inComm)}</td><td>${t.outN}</td><td>${money(r2(t.outBase))}</td><td>${money(t.outComm)}</td><td>${money(t.comm)}</td></tr>`).join("");
+    const cRows = R.comm.rows.map((r) => `<tr class="${r.mode === "none" ? "dimrow" : ""}"><td class="l"><select class="commsel" data-id="${esc(r.id)}" data-auto="${r.auto}" aria-label="Commission rate for ${esc(r.id)}">${["in", "out", "none"].map((m) => `<option value="${m}" ${r.mode === m ? "selected" : ""}>${howLbl[m]}</option>`).join("")}</select></td><td class="l">${esc(r.payee)}</td><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer || "")}</td><td class="l muted">${r.booked_at ? fmtDate(r.booked_at.slice(0, 10)) + " " + to12(r.booked_at.slice(11, 16)) : ""}</td><td class="l muted">${esc(r.how)}${r.clocked === false ? " · not clocked in" : ""}${commMode.has(r.id) ? " · changed" : ""}</td><td>${money(r.base)}</td><td>${r.comm ? money(r.comm) : "–"}</td></tr>`).join("");
+    const commTotal = r2(Object.values(R.comm.by).reduce((a, t) => a + t.comm, 0));
+    const commCard = R.comm.rows.length ? `<div class="card pb"><h2>Commissions</h2><div class="tablewrap"><table><thead><tr><th>Person</th><th>Office #</th><th>Office sales</th><th>5%</th><th>Remote #</th><th>Remote sales</th><th>7%</th><th>Commission</th></tr></thead><tbody>${cByRows}<tr class="total"><td class="l" colspan="7">Total</td><td>${money(commTotal)}</td></tr></tbody></table></div>
+        <p class="foot">Staff-made Peek bookings with a trip date in this period (cancelled excluded; no-shows and $0 bookings get no commission). Sales = booking value minus tips. Office computer = 5%. Phone app, a login with "Remote" in the name, or ${esc(settings.commRemote)} = 7%. Not counted: ${esc(settings.commNo)} and website bookings.</p>
+        <details><summary>Commission bookings (${R.comm.rows.length})</summary><div class="tablewrap"><table><thead><tr><th class="l">Rate</th><th class="l">Person</th><th class="l">Trip</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Booked</th><th class="l">How</th><th>Sales</th><th>Commission</th></tr></thead><tbody>${cRows}</tbody></table></div>
+        <p class="foot">Change a booking's rate with its menu. Changes are saved on this device.</p></details></div>` : "";
     const notes = R.notes.length ? R.notes.map((n) => `<li>${esc(n)}</li>`).join("") : `<li class="ok">No issues found.</li>`;
     el.innerHTML = `
       <div class="rhead"><div><h1>Tips ${fmtDate(R.start)} – ${fmtDate(R.end)}</h1><div class="muted">Peek tips (cancelled bookings excluded) · Peek data synced ${esc(syncTxt)} · Hours from ${esc(timesheet.fileName)}</div></div>
@@ -270,6 +332,7 @@
       <div class="card"><h2>Payout</h2><div class="tablewrap"><table class="payout"><thead><tr><th>Person</th><th class="l">From</th><th>Tips</th><th>Commission</th><th>Tip + commission</th></tr></thead><tbody>${payRows}</tbody></table></div>
         <p class="foot">Docks 75% is ${money(R.docksTotal)}${R.troyDock ? `; ${money(R.troyDock)} of it is ${esc(R.fallback)}'s dock coverage, so ${money(R.docksToChristian)} goes to Christian` : " and goes to Christian"} for the dock split. Office is rounded per day and the 5% shares per period, so totals can differ by a few cents.</p></div>
       ${capTable}
+      ${commCard}
       <div class="card"><h2>Daily office split</h2><div class="tablewrap"><table><thead><tr><th>Day</th><th># tips</th><th>Pool tips</th><th>Office 15%</th>${officeHdr}<th>${esc((R.fallback || "Fallback").split(" ")[0])} office $</th><th>Docks 75%</th><th>10% (5%+5%)</th></tr></thead><tbody>${dailyRows}${dailyTotal}</tbody></table></div>
         <p class="foot">Office 15% each day is split by Homebase paid hours. If nobody listed as office staff clocked in, it goes to ${esc(R.fallback || "the fallback person")}.</p></div>
       <div class="card pb"><h2>Dock pool by hours <span class="badge">Estimate for Christian</span></h2><div class="tablewrap"><table><thead><tr><th>Dock staff</th><th>Paid hrs</th><th>Tip hrs</th><th>Estimated share</th></tr></thead><tbody>${dockRows || `<tr><td class="l" colspan="4">No dock hours in this timesheet.</td></tr>`}</tbody></table></div>
@@ -285,6 +348,7 @@
       $("commRows").innerHTML = ""; settings.comm.forEach(commRow);
       recompute(false);
     }));
+    el.querySelectorAll(".commsel").forEach((c) => c.addEventListener("change", () => { if (c.value === c.dataset.auto) commMode.delete(c.dataset.id); else commMode.set(c.dataset.id, c.value); saveCommModes(); recompute(false); }));
     el.querySelectorAll(".capsel").forEach((c) => c.addEventListener("change", () => { if (c.value === "rule") capMode.delete(c.dataset.id); else capMode.set(c.dataset.id, c.value); saveCap(); recompute(false); }));
     $("xl").onclick = () => exportXlsx(R);
     $("pdf").onclick = () => window.print();
@@ -305,6 +369,8 @@
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dk), "Dock Estimate");
     const tips = [["Date", "Time", "Booking", "Customer", "Product", "Tip", "Captain", "To captain", "To pool"], ...R.rows.map((r) => [fmtDate(r.date), to12(r.time), r.id, r.customer, r.product, r.tip, r.isCap ? (r.captains.join(", ") || "not in notes") : "", r.toCap, r.pool])];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(tips), "Peek Tips");
+    const cm = [["Person", "Trip date", "Booking", "Customer", "Booked at", "How", "Rate", "Sales (value minus tips)", "Commission"], ...R.comm.rows.map((r) => [r.payee, fmtDate(r.date), r.id, r.customer, r.booked_at || "", r.how, r.rate, r.base, r.comm])];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cm), "Commissions");
     if (R.notes.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Notes"], ...R.notes.map((n) => [n])]), "Notes");
     XLSX.writeFile(wb, `NFT-Tips-${R.start}-to-${R.end}.xlsx`);
   }
@@ -319,8 +385,9 @@
   }
   function initSettings() {
     $("office").value = settings.office; $("fallback").value = settings.fallback; $("five").value = settings.five; $("dockRoles").value = settings.dockRoles;
+    $("commNo").value = settings.commNo; $("commRemote").value = settings.commRemote;
     $("commRows").innerHTML = ""; settings.comm.forEach(commRow);
-    ["office", "fallback", "five", "dockRoles"].forEach((id) => $(id).addEventListener("change", save));
+    ["office", "fallback", "five", "dockRoles", "commNo", "commRemote"].forEach((id) => $(id).addEventListener("change", save));
     $("addComm").onclick = () => commRow({ name: "", amt: "" });
 
   }
@@ -403,16 +470,16 @@
     document.querySelectorAll("#periodChips .chip").forEach((c) => c.classList.toggle("on", c === btn));
     $("start").value = s; $("end").value = e; run();
   }
-  function recompute(scroll) { if (!cache || !timesheet) return; lastReport = compute(cache.start, cache.end, cache.rows, timesheet, cache.windows); render(lastReport, cache.last_sync, scroll); }
+  function recompute(scroll) { if (!cache || !timesheet) return; lastReport = compute(cache.start, cache.end, cache.rows, timesheet, cache.windows, cache.staffBookings); render(lastReport, cache.last_sync, scroll); }
   $("run").onclick = () => { document.querySelectorAll("#periodChips .chip").forEach((c) => c.classList.remove("on")); run(); };
   // Peek data is pulled in pieces of up to 31 days, so any period length works.
   async function fetchRange(start, end) {
     const add = (d, n) => { const x = new Date(d + "T12:00:00Z"); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
-    const out = { rows: [], windows: {}, last_sync: null };
+    const out = { rows: [], windows: {}, staffBookings: [], last_sync: null };
     for (let s = start; s <= end; s = add(s, 31)) {
       const e = add(s, 30) < end ? add(s, 30) : end;
       const part = await api({ start: s, end: e });
-      out.rows.push(...(part.rows || [])); Object.assign(out.windows, part.windows || {});
+      out.rows.push(...(part.rows || [])); out.staffBookings.push(...(part.staffBookings || [])); Object.assign(out.windows, part.windows || {});
       if (part.last_sync && (!out.last_sync || part.last_sync > out.last_sync)) out.last_sync = part.last_sync;
     }
     return out;
@@ -426,7 +493,7 @@
     try {
       const data = await fetchRange(start, end);
       if (my !== reqId) return; // a newer request replaced this one
-      cache = { start, end, rows: data.rows, windows: data.windows || {}, last_sync: data.last_sync };
+      cache = { start, end, rows: data.rows, windows: data.windows || {}, staffBookings: data.staffBookings || [], last_sync: data.last_sync };
       recompute(true);
       status(`${label(start, end)} · ${data.rows.length} tipped bookings from Peek.`);
     } catch (err) { if (my === reqId) status(err.message, true); }
