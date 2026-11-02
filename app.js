@@ -15,7 +15,7 @@
     five: "Troy McKay, Tabitha",
     dockRoles: "Dock, ON CALL",
     comm: [],
-    commNo: "Troy McKay, Jodi Maynard",
+    commNo: "Troy McKay, Jodi Maynard, Deej Lorenzo, Dorothy",
     commRemote: "T Crawford",
     vquipFee: "10",
     taxPct: "2.5641",
@@ -162,6 +162,7 @@
       const check = noteHit(b.notes);
       let auto, how;
       if (b.no_show) { auto = "none"; how = "no-show"; }
+      else if (/water rental/i.test(b.product || "")) { auto = "none"; how = "Water Rentals (no commission)"; }
       else if (base <= 0) { auto = "none"; how = paid <= 0 ? "nothing paid" : "$0 after fees"; }
       else if (b.source === "website") { auto = "none"; how = `website, tagged ${tag.raw}`; }
       else if (remote.some((n) => matches(n, b.by))) { auto = "out"; how = tag ? `${tag.raw} · ${b.by} login = 7%` : `${b.by} login = 7%`; }
@@ -364,7 +365,7 @@
     const chk = R.comm.rows.filter((r) => r.check && r.mode !== "none");
     const chkTable = chk.length ? `<h3>Check for add-on time, gift certificates or deposits (${chk.length})</h3><p class="foot">Peek gives one total per booking, so these can't be split out automatically. These bookings have notes that mention them. Type the amount that shouldn't earn commission in Exclude $.</p><div class="tablewrap"><table><thead><tr><th class="l">Person</th><th class="l">Trip</th><th class="l">Booking</th><th class="l">Note</th><th>Paid</th><th>Exclude $ (as in Peek, with tax)</th><th>Commission</th></tr></thead><tbody>${chk.map((r) => `<tr><td class="l">${esc(r.payee)}</td><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(r.id)}</td><td class="l muted">${esc(r.check)}</td><td>${money(r.paid)}</td><td><input class="exin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" aria-label="Amount to exclude for ${esc(r.id)}" data-id="${esc(r.id)}" value="${r.excl ? r.excl.toFixed(2) : ""}"></td><td>${money(r.comm)}</td></tr>`).join("")}</tbody></table></div>` : "";
     const commCard = R.comm.rows.length ? `<div class="card pb"><h2>Commissions</h2><div class="tablewrap"><table><thead><tr><th>Person</th><th>Office #</th><th>Office sales</th><th>3%</th><th>Remote #</th><th>Remote sales</th><th>7%</th><th>Commission</th></tr></thead><tbody>${cByRows}<tr class="total"><td class="l" colspan="7">Total</td><td>${money(commTotal)}</td></tr></tbody></table></div>
-        <p class="foot">Staff-made Peek bookings with a trip date in this period (cancelled excluded; no-shows and $0 bookings get no commission). Sales = amount paid in Peek (minus tips and anything owed), without tax (${esc(settings.taxPct)}%), minus the vQuip fee (${money(parseFloat(settings.vquipFee) || 0)} per boat before tax; none on Water Rentals), minus captain fees (${isNaN(parseFloat(settings.captainFee)) ? "not set yet" : money(parseFloat(settings.captainFee)) + (settings.captainUnit === "booking" ? " per captain per booking" : " per captain per hour")}). The Peek sales-agent tag decides who gets credit and the rate: In-Office = 3%, Remote = 7% (Nicole C. is paid as Tabitha). Bookings without a tag: phone app or ${esc(settings.commRemote)} = 7%, office computer = 3%. Not counted: ${esc(settings.commNo)}, customer website bookings, and amounts typed in Exclude $ (add-on time, gift certificates, deposits).</p>
+        <p class="foot">Staff-made Peek bookings with a trip date in this period (no commission on cancelled, no-show, Water Rentals or $0 bookings). Sales = amount paid in Peek (minus tips and anything owed), without tax (${esc(settings.taxPct)}%), minus the vQuip fee (${money(parseFloat(settings.vquipFee) || 0)} per boat before tax; none on Water Rentals), minus captain fees (${isNaN(parseFloat(settings.captainFee)) ? "not set yet" : money(parseFloat(settings.captainFee)) + (settings.captainUnit === "booking" ? " per captain per booking" : " per captain per hour")}). The Peek sales-agent tag decides who gets credit and the rate: In-Office = 3%, Remote = 7% (Nicole C. is paid as Tabitha). Bookings without a tag: phone app or ${esc(settings.commRemote)} = 7%, office computer = 3%. Not counted: ${esc(settings.commNo)}, customer website bookings, and amounts typed in Exclude $ (add-on time, gift certificates, deposits).</p>
         ${chkTable}
         <details><summary>Commission bookings (${R.comm.rows.length})</summary><div class="tablewrap"><table><thead><tr><th class="l">Rate</th><th class="l">Person</th><th class="l">Trip</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Booked</th><th class="l">How</th><th>Boats</th><th>Exclude $</th><th>Sales</th><th>Commission</th></tr></thead><tbody>${cRows}</tbody></table></div>
         <p class="foot">Change a booking's rate with its menu. Changes are saved on this device.</p></details></div>` : "";
