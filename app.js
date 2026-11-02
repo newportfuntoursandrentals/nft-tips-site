@@ -120,7 +120,16 @@
   const commExcl = (() => { try { return new Map(Object.entries(JSON.parse(window["local" + "Storage"].getItem(EXCL_KEY) || "{}"))); } catch { return new Map(); } })();
   const saveExcl = () => { try { window["local" + "Storage"].setItem(EXCL_KEY, JSON.stringify(Object.fromEntries(commExcl))); } catch {} };
   // Notes that suggest part of the value is add-on time, a gift certificate or a deposit (Peek only gives one total per booking).
-  const CHECK_RE = /\badded\b|\badd(?:ed)?\s+(?:\d|an?\s+(?:hour|hr)|time|more\s+time)|extra\s+(?:time|hour|hr|\d+\s*min)|extend|gift\s*(?:card|cert)|\bg\.?c\.?\b|certificate|deposit|voucher/i;
+  const SPLIT_KEY = "nftTipsCommSplit";
+  const commSplit = (() => { try { return new Map(Object.entries(JSON.parse(window["local" + "Storage"].getItem(SPLIT_KEY) || "{}"))); } catch { return new Map(); } })();
+  const saveSplit = () => { try { window["local" + "Storage"].setItem(SPLIT_KEY, JSON.stringify(Object.fromEntries(commSplit))); } catch {} };
+  const SELLERS = ["Rosa Hernandez", "Rachel McFarland", "Annie Huang", "Brianna Ramirez", "Tabitha"];
+  // Store-credit rebookings (credit from an earlier booking) earn no commission.
+  const CREDIT_RE = /store\s*credit|appl(?:y|ied|ying)\s+(?:the\s+|their\s+|his\s+|her\s+)?(?:store\s+)?credit|credit\s+applied|us(?:e|ed|ing)\s+(?:the\s+|their\s+|his\s+|her\s+)?credit/i;
+  // Notes that mention a second seller sharing the commission.
+  const SPLIT_RE = /\bsplit\b|\bshar(?:e|ed|ing)\b|\b(?:2|two)\s+sellers?\b/i;
+  const noteBit = (n, re) => { const t = String(n || "").replace(/\s+/g, " "); const m = t.match(re); if (!m) return ""; const i = Math.max(0, m.index - 40); return (i ? "…" : "") + t.slice(i, m.index + m[0].length + 40).trim() + (m.index + m[0].length + 40 < t.length ? "…" : ""); };
+  const CHECK_RE = /\badded\b|\badd(?:ed)?\s+(?:\d|an?\s+(?:hour|hr)|time|more\s+time)|extra\s+(?:time|hour|hr|\d+\s*min)|extend|gift\s*(?:card|cert)|\bg\.?c\.?\b|certificate|deposit|voucher|\$\s?\d+\s*(?:reschedul\w*\s+|move\s+|change\s+)?fee|reschedul\w*\s+fee/i;
   function noteHit(n) { const t = String(n || "").replace(/\s+/g, " "); const m = t.match(CHECK_RE); if (!m) return ""; const i = Math.max(0, m.index - 40); return (i ? "…" : "") + t.slice(i, m.index + 70) + (m.index + 70 < t.length ? "…" : ""); }
   const saveCommModes = () => { try { window["local" + "Storage"].setItem(COMM_KEY, JSON.stringify(Object.fromEntries(commMode))); } catch {} };
   // Commission on staff-made bookings by trip date. Phone app or remote login = 7%, office computer = 3%.
@@ -164,7 +173,8 @@
       if (b.no_show) { auto = "none"; how = "no-show"; }
       else if (/water rental/i.test(b.product || "")) { auto = "none"; how = "Water Rentals (no commission)"; }
       else if (base <= 0) { auto = "none"; how = paid <= 0 ? "nothing paid" : "$0 after fees"; }
-      else if (b.source === "website") { auto = "none"; how = `website, tagged ${tag.raw}`; }
+      else if (b.source === "website") { auto = "none"; how = tag ? `booked online, tagged ${tag.raw} (changes by staff don't count)` : "booked online"; }
+      else if (CREDIT_RE.test(b.notes || "")) { auto = "none"; how = "store credit rebooking (no commission)"; }
       else if (remote.some((n) => matches(n, b.by))) { auto = "out"; how = tag ? `${tag.raw} · ${b.by} login = 7%` : `${b.by} login = 7%`; }
       else if (tag) { auto = tag.where; how = tag.raw; }
       else if (b.source && b.source !== "backend") { auto = "out"; how = "phone app (no tag)"; }
@@ -172,6 +182,8 @@
       const mode = commMode.get(b.id) || auto;
       const rate = mode === "in" ? IN_RATE : mode === "out" ? OUT_RATE : 0;
       const comm = r2(base * rate);
+      const split = commSplit.get(b.id) && commSplit.get(b.id) !== payee ? commSplit.get(b.id) : "";
+      const splitNote = noteBit(b.notes, SPLIT_RE);
       // Untagged office-computer bookings made while the person wasn't clocked in on Homebase.
       let clocked = null;
       if (auto === "in" && !tag && b.booked_at && ts) {
@@ -184,13 +196,20 @@
           if (!clocked && !commMode.has(b.id)) flags.push(`${b.id} (${payee}, trip ${fmtDate(b.date)}) has no In-Office/Remote tag and was booked at ${to12(b.booked_at.slice(11, 16))} on ${fmtDate(bd)}, when ${payee.split(" ")[0]} wasn't clocked in. Counted at 3%; change it to 7% if it was remote.`);
         }
       }
-      if (b.source === "website" && !b.no_show && !commMode.has(b.id)) flags.push(`${b.id} (trip ${fmtDate(b.date)}) was booked on the website but tagged ${tag.raw}. Not counted; set a rate in Commissions if it should be.`);
+      if (b.source === "website" && tag && !b.no_show && !commMode.has(b.id)) flags.push(`${b.id} (trip ${fmtDate(b.date)}) was booked on the website but tagged ${tag.raw}. Not counted; set a rate in Commissions if it should be.`);
       if (capMissing && !b.no_show) flags.push(`${b.id} (${payee}, trip ${fmtDate(b.date)}) is captained (${b.captains.join(", ") || "captain product"}), but no captain fee is set in Advanced settings, so the captain fee is still in the sales amount.`);
+      if (auto === "none" && how.startsWith("store credit") && !commMode.has(b.id)) flags.push(`${b.id} (${payee}, trip ${fmtDate(b.date)}) uses store credit, so it's not counted. If new money was added (for example another boat), set its rate and type the store-credit part in Exclude $. Note: "${noteBit(b.notes, CREDIT_RE)}"`);
+      if (splitNote && !split && rate) flags.push(`${b.id} (${payee}, trip ${fmtDate(b.date)}) notes mention a split: "${splitNote}". If two sellers share it, pick the second seller in Split with.`);
       if (b.balance > 0 && !b.no_show) flags.push(`${b.id} (${payee}, trip ${fmtDate(b.date)}) still shows ${money(b.balance)} owed in Peek. Commission is only on the ${money(paid)} paid.`);
-      rows.push({ ...b, payee, base, paid, preTax, tax, vq, cap, nCap, excl, check, boats, auto, how, mode, rate, comm, clocked });
-      const t = (by[payee] ||= { inN: 0, inBase: 0, inComm: 0, outN: 0, outBase: 0, outComm: 0, comm: 0 });
-      if (mode === "in") { t.inN++; t.inBase += base; t.inComm = r2(t.inComm + comm); } else if (mode === "out") { t.outN++; t.outBase += base; t.outComm = r2(t.outComm + comm); }
-      t.comm = r2(t.comm + comm);
+      // Two sellers: each gets half of the commission.
+      const half = split ? r2(comm / 2) : comm;
+      rows.push({ ...b, payee, base, paid, preTax, tax, vq, cap, nCap, excl, check, boats, auto, how, mode, rate, comm, clocked, split, splitNote, mine: half, theirs: split ? r2(comm - half) : 0 });
+      const add = (who, amt, sales) => {
+        const t = (by[who] ||= { inN: 0, inBase: 0, inComm: 0, outN: 0, outBase: 0, outComm: 0, comm: 0 });
+        if (mode === "in") { t.inN++; t.inBase += sales; t.inComm = r2(t.inComm + amt); } else if (mode === "out") { t.outN++; t.outBase += sales; t.outComm = r2(t.outComm + amt); }
+        t.comm = r2(t.comm + amt);
+      };
+      if (split && rate) { add(payee, half, base / 2); add(split, r2(comm - half), base / 2); } else add(payee, comm, base);
     }
     rows.sort((a, b) => a.payee.localeCompare(b.payee) || a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
     return { rows, flags, by };
@@ -360,15 +379,15 @@
         <p class="foot">Mon–Fri: captain gets the first $${CAPTAIN_WEEKDAY} of the tip, the rest goes to the pool. Sat–Sun: captain gets the whole tip. Captained bookings are found from "Captain &lt;name&gt;" in the Peek notes or the captained-tour product. Use the Split menu for exceptions: "Captain keeps all" gives the captain the whole tip on any day, "All to pool" means it wasn't captained. Choices are saved on this device.</p></div>` : "";
     const howLbl = { in: "3% office", out: "7% remote", none: "No commission" };
     const cByRows = Object.entries(R.comm.by).map(([n, t]) => `<tr><td class="l">${esc(n)}</td><td>${t.inN}</td><td>${money(r2(t.inBase))}</td><td>${money(t.inComm)}</td><td>${t.outN}</td><td>${money(r2(t.outBase))}</td><td>${money(t.outComm)}</td><td>${money(t.comm)}</td></tr>`).join("");
-    const cRows = R.comm.rows.map((r) => `<tr class="${r.mode === "none" ? "dimrow" : ""}"><td class="l"><select class="commsel" data-id="${esc(r.id)}" data-auto="${r.auto}" aria-label="Commission rate for ${esc(r.id)}">${["in", "out", "none"].map((m) => `<option value="${m}" ${r.mode === m ? "selected" : ""}>${howLbl[m]}</option>`).join("")}</select></td><td class="l">${esc(r.payee)}</td><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer || "")}</td><td class="l muted">${r.booked_at ? fmtDate(r.booked_at.slice(0, 10)) + " " + to12(r.booked_at.slice(11, 16)) : ""}</td><td class="l muted">${esc(r.how)}${r.clocked === false ? " · not clocked in" : ""}${commMode.has(r.id) ? " · changed" : ""}${r.check ? `<div class="tiny warn">Check note: ${esc(r.check)}</div>` : ""}</td><td>${r.boats}</td><td><input class="exin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" aria-label="Amount to exclude for ${esc(r.id)}" data-id="${esc(r.id)}" value="${r.excl ? r.excl.toFixed(2) : ""}"></td><td>${money(r.base)}<div class="tiny">${money(r.paid)} paid${r.excl ? ` − ${money(r.excl)}` : ""} − ${money(r.tax)} tax${r.vq ? ` − ${money(r.vq)} vQuip` : ""}${r.cap ? ` − ${money(r.cap)} captain` : ""}</div></td><td>${r.comm ? money(r.comm) : "–"}</td></tr>`).join("");
+    const cRows = R.comm.rows.map((r) => `<tr class="${r.mode === "none" ? "dimrow" : ""}"><td class="l"><select class="commsel" data-id="${esc(r.id)}" data-auto="${r.auto}" aria-label="Commission rate for ${esc(r.id)}">${["in", "out", "none"].map((m) => `<option value="${m}" ${r.mode === m ? "selected" : ""}>${howLbl[m]}</option>`).join("")}</select></td><td class="l">${esc(r.payee)}</td><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(r.id)}</td><td class="l">${esc(r.customer || "")}</td><td class="l muted">${r.booked_at ? fmtDate(r.booked_at.slice(0, 10)) + " " + to12(r.booked_at.slice(11, 16)) : ""}</td><td class="l muted">${esc(r.how)}${r.clocked === false ? " · not clocked in" : ""}${commMode.has(r.id) ? " · changed" : ""}${r.check ? `<div class="tiny warn">Check note: ${esc(r.check)}</div>` : ""}</td><td>${r.boats}</td><td><input class="exin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" aria-label="Amount to exclude for ${esc(r.id)}" data-id="${esc(r.id)}" value="${r.excl ? r.excl.toFixed(2) : ""}"></td><td>${money(r.base)}<div class="tiny">${money(r.paid)} paid${r.excl ? ` − ${money(r.excl)}` : ""} − ${money(r.tax)} tax${r.vq ? ` − ${money(r.vq)} vQuip` : ""}${r.cap ? ` − ${money(r.cap)} captain` : ""}</div></td><td class="l"><select class="splitsel" data-id="${esc(r.id)}" aria-label="Split ${esc(r.id)} with">${["", ...SELLERS.filter((n) => n !== r.payee)].map((n) => `<option value="${esc(n)}" ${r.split === n ? "selected" : ""}>${n ? esc(n) + " (½)" : "No split"}</option>`).join("")}</select>${r.splitNote && !r.split ? `<div class="tiny warn">Note: ${esc(r.splitNote)}</div>` : ""}</td><td>${r.comm ? money(r.comm) : "–"}${r.split && r.comm ? `<div class="tiny">${money(r.mine)} ${esc(r.payee.split(" ")[0])} · ${money(r.theirs)} ${esc(r.split.split(" ")[0])}</div>` : ""}</td></tr>`).join("");
     const commTotal = r2(Object.values(R.comm.by).reduce((a, t) => a + t.comm, 0));
     const chk = R.comm.rows.filter((r) => r.check && r.mode !== "none");
     const chkTable = chk.length ? `<h3>Check for add-on time, gift certificates or deposits (${chk.length})</h3><p class="foot">Peek gives one total per booking, so these can't be split out automatically. These bookings have notes that mention them. Type the amount that shouldn't earn commission in Exclude $.</p><div class="tablewrap"><table><thead><tr><th class="l">Person</th><th class="l">Trip</th><th class="l">Booking</th><th class="l">Note</th><th>Paid</th><th>Exclude $ (as in Peek, with tax)</th><th>Commission</th></tr></thead><tbody>${chk.map((r) => `<tr><td class="l">${esc(r.payee)}</td><td class="l">${fmtDate(r.date)}</td><td class="l">${esc(r.id)}</td><td class="l muted">${esc(r.check)}</td><td>${money(r.paid)}</td><td><input class="exin" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00" aria-label="Amount to exclude for ${esc(r.id)}" data-id="${esc(r.id)}" value="${r.excl ? r.excl.toFixed(2) : ""}"></td><td>${money(r.comm)}</td></tr>`).join("")}</tbody></table></div>` : "";
     const commCard = R.comm.rows.length ? `<div class="card pb"><h2>Commissions</h2><div class="tablewrap"><table><thead><tr><th>Person</th><th>Office #</th><th>Office sales</th><th>3%</th><th>Remote #</th><th>Remote sales</th><th>7%</th><th>Commission</th></tr></thead><tbody>${cByRows}<tr class="total"><td class="l" colspan="7">Total</td><td>${money(commTotal)}</td></tr></tbody></table></div>
-        <p class="foot">Staff-made Peek bookings with a trip date in this period (no commission on cancelled, no-show, Water Rentals or $0 bookings). Sales = amount paid in Peek (minus tips and anything owed), without tax (${esc(settings.taxPct)}%), minus the vQuip fee (${money(parseFloat(settings.vquipFee) || 0)} per boat before tax; none on Water Rentals), minus captain fees (${isNaN(parseFloat(settings.captainFee)) ? "not set yet" : money(parseFloat(settings.captainFee)) + (settings.captainUnit === "booking" ? " per captain per booking" : " per captain per hour")}). The Peek sales-agent tag decides who gets credit and the rate: In-Office = 3%, Remote = 7% (Nicole C. is paid as Tabitha). Bookings without a tag: phone app or ${esc(settings.commRemote)} = 7%, office computer = 3%. Not counted: ${esc(settings.commNo)}, customer website bookings, and amounts typed in Exclude $ (add-on time, gift certificates, deposits).</p>
+        <p class="foot">Staff-made Peek bookings with a trip date in this period (no commission on cancelled, no-show, Water Rentals or $0 bookings). Sales = amount paid in Peek (minus tips and anything owed), without tax (${esc(settings.taxPct)}%), minus the vQuip fee (${money(parseFloat(settings.vquipFee) || 0)} per boat before tax; none on Water Rentals), minus captain fees (${isNaN(parseFloat(settings.captainFee)) ? "not set yet" : money(parseFloat(settings.captainFee)) + (settings.captainUnit === "booking" ? " per captain per booking" : " per captain per hour")}). The Peek sales-agent tag decides who gets credit and the rate: In-Office = 3%, Remote = 7% (Nicole C. is paid as Tabitha). Bookings without a tag: phone app or ${esc(settings.commRemote)} = 7%, office computer = 3%. Not counted: ${esc(settings.commNo)}; bookings that started online, even if staff change them later; store-credit rebookings; and amounts typed in Exclude $ (add-on time, gift certificates, deposits, fees). A Groupon customer who pays for a new booking counts on the money paid. Two sellers on one booking split the commission 50/50.</p>
         ${chkTable}
-        <details><summary>Commission bookings (${R.comm.rows.length})</summary><div class="tablewrap"><table><thead><tr><th class="l">Rate</th><th class="l">Person</th><th class="l">Trip</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Booked</th><th class="l">How</th><th>Boats</th><th>Exclude $</th><th>Sales</th><th>Commission</th></tr></thead><tbody>${cRows}</tbody></table></div>
-        <p class="foot">Change a booking's rate with its menu. Changes are saved on this device.</p></details></div>` : "";
+        <details><summary>Commission bookings (${R.comm.rows.length})</summary><div class="tablewrap"><table><thead><tr><th class="l">Rate</th><th class="l">Person</th><th class="l">Trip</th><th class="l">Booking</th><th class="l">Customer</th><th class="l">Booked</th><th class="l">How</th><th>Boats</th><th>Exclude $</th><th>Sales</th><th class="l">Split with</th><th>Commission</th></tr></thead><tbody>${cRows}</tbody></table></div>
+        <p class="foot">Change a booking's rate with its menu. If two sellers worked a booking (for example one booked it and another added a boat), pick the second seller in Split with and each gets half. Changes are saved on this device.</p></details></div>` : "";
     const notes = R.notes.length ? R.notes.map((n) => `<li class="${/^Check commission/.test(n) ? "v-comm" : "v-tips"}">${esc(n)}</li>`).join("") : `<li class="ok">No issues found.</li>`;
     el.innerHTML = `
       <div class="rhead"><div><h1><span class="v-tips">Tips</span><span class="v-comm">Commissions</span> ${fmtDate(R.start)} – ${fmtDate(R.end)}</h1><div class="muted"><span class="v-tips">Peek tips</span><span class="v-comm">Peek staff bookings by trip date</span> (cancelled bookings excluded) · Peek data synced ${esc(syncTxt)} · Hours from ${esc(timesheet.fileName)}</div></div>
@@ -399,6 +418,7 @@
       recompute(false);
     }));
     el.querySelectorAll(".exin").forEach((i) => i.addEventListener("change", () => { const v = parseFloat(i.value); if (v > 0) commExcl.set(i.dataset.id, String(r2(v))); else commExcl.delete(i.dataset.id); saveExcl(); recompute(false); }));
+    el.querySelectorAll(".splitsel").forEach((c) => c.addEventListener("change", () => { if (c.value) commSplit.set(c.dataset.id, c.value); else commSplit.delete(c.dataset.id); saveSplit(); recompute(false); }));
     el.querySelectorAll(".commsel").forEach((c) => c.addEventListener("change", () => { if (c.value === c.dataset.auto) commMode.delete(c.dataset.id); else commMode.set(c.dataset.id, c.value); saveCommModes(); recompute(false); }));
     el.querySelectorAll(".capsel").forEach((c) => c.addEventListener("change", () => { if (c.value === "rule") capMode.delete(c.dataset.id); else capMode.set(c.dataset.id, c.value); saveCap(); recompute(false); }));
     $("xl").onclick = () => exportXlsx(R);
@@ -420,7 +440,7 @@
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dk), "Dock Estimate");
     const tips = [["Date", "Time", "Booking", "Customer", "Product", "Tip", "Captain", "To captain", "To pool"], ...R.rows.map((r) => [fmtDate(r.date), to12(r.time), r.id, r.customer, r.product, r.tip, r.isCap ? (r.captains.join(", ") || "not in notes") : "", r.toCap, r.pool])];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(tips), "Peek Tips");
-    const cm = [["Person", "Trip date", "Booking", "Customer", "Booked at", "Peek tag / how", "Boats", "Value", "Tips", "Owed", "Paid", "Excluded", "Tax", "vQuip fee", "Captain fee", "Sales", "Rate", "Commission", "Check note"], ...R.comm.rows.map((r) => [r.payee, fmtDate(r.date), r.id, r.customer, r.booked_at || "", r.how, r.boats, r.value, r.tip || 0, r.balance || 0, r.paid, r.excl, r.tax, r.vq, r.cap, r.base, r.rate, r.comm, r.check])];
+    const cm = [["Person", "Trip date", "Booking", "Customer", "Booked at", "Peek tag / how", "Boats", "Value", "Tips", "Owed", "Paid", "Excluded", "Tax", "vQuip fee", "Captain fee", "Sales", "Rate", "Commission", "Split with", "Person's share", "Split share", "Check note"], ...R.comm.rows.map((r) => [r.payee, fmtDate(r.date), r.id, r.customer, r.booked_at || "", r.how, r.boats, r.value, r.tip || 0, r.balance || 0, r.paid, r.excl, r.tax, r.vq, r.cap, r.base, r.rate, r.comm, r.split, r.split ? r.mine : r.comm, r.theirs, r.check])];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cm), "Commissions");
     if (R.notes.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Notes"], ...R.notes.map((n) => [n])]), "Notes");
     XLSX.writeFile(wb, `NFT-Tips-${R.start}-to-${R.end}.xlsx`);
